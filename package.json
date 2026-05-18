@@ -32,9 +32,12 @@
     "dev:node": "tsx watch src/node.ts",
     "dev:worker": "wrangler dev",
     "deploy:worker": "wrangler deploy",
+    "restart": "bash scripts/restart.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:restart": "bash tests/restart.test.sh",
+    "preinstall": "npx only-allow pnpm"
   },
   "keywords": [
     "claude",
@@ -47,8 +50,10 @@
     "cloudflare-workers"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=18",
+    "pnpm": ">=10"
   },
+  "packageManager": "pnpm@10.21.0",
   "license": "MIT",
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240512.0",
