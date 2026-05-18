@@ -85,10 +85,12 @@ function effectiveCost(
  *  if the baseline were warm-cache and savings look tiny.
  *
  *  Uses `imageBytes` (actual PNG byte count) to estimate image tokens rather
- *  than `imageCount × 3066`. The old worst-case estimate assumed every image
- *  was 1466×1568, which our renderer never produces — typical images at this
- *  workload are ~1466×90px, so the worst-case overestimates by ~15× and the
- *  `extraText` clamp collapses to 0, hiding real savings.
+ *  than `imageCount × 3066`. The old constant assumed every image was the
+ *  worst-case 1466×1568 (Anthropic's max). Reality: our renderer's width is
+ *  fixed at 2*PAD_X + DEFAULT_COLS*ATLAS_CELL_W = 908px, so even a full-height
+ *  image is only 908×1568/750 ≈ 1898 tokens — and a typical image at this
+ *  workload is closer to 908×~140px (~170 tokens). Worst-case overestimated
+ *  by ~15×, the `extraText` clamp collapsed to 0, and real savings hid.
  */
 function baselineCost(
   actualEff: number,
