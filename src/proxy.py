@@ -120,9 +120,12 @@ def render_chunks(text: str, font_size: int = FONT_SIZE) -> list[bytes]:
             tallest = lines_per_col if c_needed > 1 else len(chunk)
         else:
             tallest = len(chunk)
-        # All non-last columns are full lines_per_col; last col has the remainder
+        # All non-last columns are full lines_per_col; last col has the remainder.
+        # Single-column case → tight bound (just last_col_lines, no canvas pad).
+        # Multi-column case → all earlier cols are full lines_per_col tall, so
+        #                     the image must be lines_per_col rows tall to fit them.
         last_col_lines = len(chunk) - (c_needed - 1) * lines_per_col
-        tallest = max(lines_per_col, last_col_lines) if c_needed == 1 else lines_per_col
+        tallest = max(1, last_col_lines) if c_needed == 1 else lines_per_col
         chunk_img_h = line_h * tallest
         img = Image.new("L", (chunk_img_w, chunk_img_h), 255)
         d = ImageDraw.Draw(img)
