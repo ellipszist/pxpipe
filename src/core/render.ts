@@ -328,6 +328,20 @@ export async function renderTextToPngs(
 const GUTTER_CELLS = 4;
 const MAX_WIDTH_PX = 1568;
 
+/** Mid-gray ink level for the multicol gutter divider, BEFORE the final
+ *  `255 - fb[i]` invert that flips the framebuffer to black-on-white. 64
+ *  pre-invert → 191 post-invert = a light gray (~75% white) that the vision
+ *  encoder can resolve as a boundary cue without competing with the glyph
+ *  ink (which lands at 0 = pure black). Same "visible whitespace" principle
+ *  as the U+2192 tab arrow: surfaces structure that pure whitespace alone
+ *  leaves ambiguous, at near-zero pixel-token cost (DEFLATE collapses long
+ *  runs of identical mid-gray ~free). */
+const GUTTER_DIVIDER_INK = 64;
+/** Vertical inset of the divider from the canvas top/bottom edges, in pixels.
+ *  Keeps the line short of the padding region so it reads as intentional
+ *  rather than as a render artifact bleeding into the margin. */
+const GUTTER_DIVIDER_INSET_PX = 2;
+
 /** Pixel width of a multi-col render canvas at the given `cols` and `numCols`. */
 export function multiColWidth(cols: number, numCols: number): number {
   const n = Math.max(1, numCols | 0);
@@ -382,6 +396,35 @@ async function renderMultiColChunkFromLines(
         } else {
           col += advance;
         }
+      }
+    }
+  }
+
+  // Draw a faint vertical divider in each gutter BEFORE the invert pass.
+  // We're still in "ink = high, background = low" framebuffer convention here,
+  // so GUTTER_DIVIDER_INK (64) lands at 255-64 = 191 after the invert — a
+  // light gray on the final image. Position the line in the *center* of the
+  // gutter region between columns c and c+1, with a small top/bottom inset
+  // so it doesn't visually bleed into the padding rows.
+  //
+  // Cost: ~1568 px × 1 byte = 1568 bytes of identical mid-gray. After DEFLATE
+  // this is ~3-5 bytes; per-pixel token cost is β·1568 ≈ 2 tokens for the
+  // entire divider at the current measured β. Trivial vs the OCR-clarity win.
+  if (numCols >= 2) {
+    const gutterPxPerSide = GUTTER_CELLS * ATLAS_CELL_W;
+    const yStart = GUTTER_DIVIDER_INSET_PX;
+    const yEnd = height - GUTTER_DIVIDER_INSET_PX;
+    for (let c = 0; c < numCols - 1; c++) {
+      // X coord: end of column c's text area + half the gutter.
+      const colEndX = PAD_X + c * colStride + cols * ATLAS_CELL_W;
+      const dividerX = colEndX + Math.floor(gutterPxPerSide / 2);
+      for (let y = yStart; y < yEnd; y++) {
+        const idx = y * width + dividerX;
+        // Only paint if the pixel is still background (0). Defensive against
+        // a glyph-overrun scenario where a wide char could in principle have
+        // landed in the gutter — though our wrap math caps col < cols above,
+        // so this is belt-and-braces.
+        if (fb[idx] === 0) fb[idx] = GUTTER_DIVIDER_INK;
       }
     }
   }

@@ -152,6 +152,90 @@ describe('renderer', () => {
     expect(dropped).toBe(0);
   });
 
+  it('multi-col draws a light-gray gutter divider (OCR column-boundary cue)', async () => {
+    // Same "visible whitespace" idea as the U+2192 tab arrow: surface the
+    // column boundary explicitly instead of relying on gap-of-whitespace
+    // alone. The pixel sits at MID-GRAY (~191/255), distinct from both
+    // background (255) and glyph ink (~0), so the vision encoder reads it
+    // as a structural cue without competing with text. Cost is ~one
+    // 1-pixel-wide column of identical gray that DEFLATE-collapses to ~5
+    // bytes per gutter.
+    //
+    // Verification: inflate the IDAT chunks of the rendered PNG, locate the
+    // expected divider x-coordinate (middle of the gutter between cols 0
+    // and 1), and assert at least 80% of rows at that x are mid-gray.
+    const zlib = await import('node:zlib');
+    const text = ('lorem ipsum dolor sit amet\n'.repeat(200));
+    const imgs = await renderTextToPngsMultiCol(text, 100, 2);
+    expect(imgs.length).toBeGreaterThan(0);
+    const img = imgs[0]!;
+
+    // PNG layout: 8-byte signature, then chunks of (length-be32, type-4b,
+    // data, crc-be32). IHDR is first; concat all IDATs and inflate. The
+    // inflated stream has a 1-byte filter prefix per row; for grayscale our
+    // encoder always writes filter type 0 (none) so the row body is just
+    // the raw width bytes.
+    const png = img.png;
+    let pos = 8;
+    const idats: Uint8Array[] = [];
+    while (pos < png.length) {
+      const len =
+        (png[pos]! << 24) | (png[pos + 1]! << 16) | (png[pos + 2]! << 8) | png[pos + 3]!;
+      const type = String.fromCharCode(png[pos + 4]!, png[pos + 5]!, png[pos + 6]!, png[pos + 7]!);
+      const dataStart = pos + 8;
+      if (type === 'IDAT') idats.push(png.subarray(dataStart, dataStart + len));
+      if (type === 'IEND') break;
+      pos = dataStart + len + 4;
+    }
+    const concatenated = Buffer.concat(idats.map((u) => Buffer.from(u)));
+    const inflated = zlib.inflateSync(concatenated);
+
+    // Decode: each row is 1 filter byte + width pixel bytes. We expect
+    // filter=0 (none) on every row from our encoder, so the pixel-byte
+    // index for (x, y) is `y * (width + 1) + 1 + x`.
+    const width = img.width;
+    const height = img.height;
+    // Divider X: end of col 0's text area + half the gutter.
+    //   colEnd = PAD_X (4) + 0 * stride + 100 * 5 = 504
+    //   dividerX = 504 + floor((4 * 5) / 2) = 504 + 10 = 514
+    const PAD_X = 4;
+    const CELL_W = 5;
+    const GUTTER_CELLS = 4;
+    const cols = 100;
+    const dividerX =
+      PAD_X + 0 + cols * CELL_W + Math.floor((GUTTER_CELLS * CELL_W) / 2);
+    expect(dividerX).toBeLessThan(width);
+
+    let midGrayRows = 0;
+    const rowStride = width + 1;
+    for (let y = 2; y < height - 2; y++) {
+      const px = inflated[y * rowStride + 1 + dividerX];
+      // GUTTER_DIVIDER_INK=64 pre-invert → 191 post-invert. Allow a small
+      // band in case the constant is tuned later — anywhere in [120, 230]
+      // is "mid-gray, not full ink, not background".
+      if (px !== undefined && px >= 120 && px <= 230) midGrayRows++;
+    }
+    // Most rows at the divider column should be mid-gray. The inset trims a
+    // few top/bottom pixels and there might be glyph encroachments on a
+    // handful of rows in pathological content, but >80% is the floor.
+    const liveRows = height - 4;
+    expect(midGrayRows).toBeGreaterThan(liveRows * 0.8);
+  });
+
+  it('multi-col single-column path skips the divider (byte-identical to renderTextToPngs)', async () => {
+    // The divider only paints when numCols >= 2. The numCols=1 passthrough
+    // path must remain byte-identical to the single-col renderer so the
+    // cache-control deterministic-bytes story stays intact for single-col
+    // deployments.
+    const text = ('lorem ipsum dolor sit amet\n'.repeat(100));
+    const passthrough = await renderTextToPngsMultiCol(text, 100, 1);
+    const single = await renderTextToPngs(text, 100);
+    expect(passthrough.length).toBe(single.length);
+    for (let i = 0; i < passthrough.length; i++) {
+      expect(passthrough[i]!.png).toEqual(single[i]!.png);
+    }
+  });
+
   // ---- Unicode coverage tests (Unifont atlas) -------------------------------
   // These confirm the sparse-codepoint + wide-glyph machinery works end-to-end.
   // None of them assert specific PNG bytes (the byte-deterministic guarantee
