@@ -39,6 +39,11 @@ export interface TrackEvent {
   reminder_imgs?: number;
   /** Image count attributable to compressing tool_result content. */
   tool_result_imgs?: number;
+  /** Number of tool_result blocks where the source text exceeded the
+   *  per-tool_result image budget and was truncated before rendering. */
+  truncated_tool_results?: number;
+  /** Total chars elided by paging across all tool_results this request. */
+  omitted_chars?: number;
   /** Codepoints rendered into images that weren't in the glyph atlas. A
    *  spike here means users are typing glyphs we don't ship — consider
    *  switching ATLAS_PROFILE to `full-bmp`. */
@@ -150,6 +155,12 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     if (info.dynamicBlockCount !== undefined) out.dynamic_block_count = info.dynamicBlockCount;
     if (info.reminderImgs !== undefined) out.reminder_imgs = info.reminderImgs;
     if (info.toolResultImgs !== undefined) out.tool_result_imgs = info.toolResultImgs;
+    if (info.truncatedToolResults !== undefined && info.truncatedToolResults > 0) {
+      out.truncated_tool_results = info.truncatedToolResults;
+    }
+    if (info.omittedChars !== undefined && info.omittedChars > 0) {
+      out.omitted_chars = info.omittedChars;
+    }
     if (info.droppedChars !== undefined && info.droppedChars > 0) {
       out.dropped_chars = info.droppedChars;
     }

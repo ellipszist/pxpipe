@@ -19,8 +19,9 @@ import type {
   ToolDef,
   ToolResultBlock,
 } from './types.js';
-import { renderTextToPngs } from './render.js';
+import { renderTextToPngs, MAX_HEIGHT_PX, PAD_Y } from './render.js';
 import { bytesToBase64 } from './png.js';
+import { ATLAS_CELL_H } from './atlas.js';
 
 export interface TransformOptions {
   /** Master switch — false makes this a no-op pass-through. */
@@ -49,6 +50,11 @@ export interface TransformOptions {
   placement?: 'system' | 'user';
   /** Soft-wrap column count. */
   cols?: number;
+  /** Hard upper bound on images emitted per single tool_result. Above this,
+   *  the source text is truncated (head + paging marker + tail) BEFORE
+   *  rendering so the request stays under Anthropic's 100-image-per-request
+   *  cap even when a single tool dumps a huge log. Default 10. */
+  maxImagesPerToolResult?: number;
 }
 
 const DEFAULTS: Required<TransformOptions> = {
@@ -71,6 +77,11 @@ const DEFAULTS: Required<TransformOptions> = {
   // into a user message instead.
   placement: 'user',
   cols: 100,
+  // Cap at 10 images per tool_result. With ~14k chars/image at current cell,
+  // a single tool_result can grow to ~140k chars before paging kicks in. A
+  // `find` over a big tree or `grep -r` can easily exceed this; the paging
+  // marker tells the model what was elided. Tuneable per session.
+  maxImagesPerToolResult: 10,
 };
 
 // --- per-block break-even check ---
@@ -87,13 +98,6 @@ const DEFAULTS: Required<TransformOptions> = {
 // threshold (5k) was wide of the break-even point (10k) and let net-loss
 // compressions through. The check below is the real gate.
 
-/** Characters per rendered image at the current renderer config. Derived
- *  from `cols × floor((MAX_HEIGHT_PX − 2·PAD_Y) / cell_height)` with the
- *  shipping values (cols=100, cell=5×11, MAX=1568, PAD=4):
- *     100 × floor(1560 / 11) = 100 × 141 = 14,100
- *  Re-derive if cell dimensions or column count ever change. */
-const CHARS_PER_IMAGE = 14_100;
-
 /** English ~4 chars per token average. Holds well enough for code + prose
  *  mix; tool_result content is typically code-shaped. */
 const CHARS_PER_TOKEN = 4;
@@ -103,11 +107,39 @@ const CHARS_PER_TOKEN = 4;
  *  to keep `src/core/` free of dashboard imports — that's a one-way edge. */
 const TOKENS_PER_IMAGE = 2500;
 
+/** Characters per rendered image at the current renderer config. Derived
+ *  at runtime from `ATLAS_CELL_H` (cell height) and the render canvas
+ *  dimensions imported from render.ts — single source of truth.
+ *
+ *  Formula: `cols × floor((MAX_HEIGHT_PX − 2·PAD_Y) / ATLAS_CELL_H)`
+ *
+ *  At the shipping config (Unifont, cell 5×11, cols=100):
+ *    100 × floor((1568 − 8) / 11) = 100 × 141 = 14,100
+ *
+ *  When the atlas swaps (e.g. Cozette 4×7, cell H=7), this auto-updates:
+ *    100 × floor(1560 / 7) = 100 × 222 = 22,200
+ *  …and the break-even threshold drops accordingly. Without this, the
+ *  hardcoded 14,100 would silently let net-loss compressions through on
+ *  every smaller-cell atlas. */
+/** Visual rows per image at the current atlas cell. Derived once at module
+ *  load. Auto-updates when gen-atlas regenerates with a different font/size. */
+export const LINES_PER_IMAGE = Math.max(1, Math.floor((MAX_HEIGHT_PX - 2 * PAD_Y) / ATLAS_CELL_H));
+
+export function maxCharsPerImage(cols: number): number {
+  return cols * LINES_PER_IMAGE;
+}
+
 /** Returns true iff image-compressing a text block of `textLen` chars would
  *  actually save tokens vs leaving it as text. Used as the gate before every
- *  image-encoding decision in transformRequest. */
-export function isCompressionProfitable(textLen: number): boolean {
-  const estImages = Math.max(1, Math.ceil(textLen / CHARS_PER_IMAGE));
+ *  image-encoding decision in transformRequest.
+ *
+ *  `cols` defaults to `DEFAULTS.cols` (100) so existing callers and unit
+ *  tests that pass only `textLen` keep working byte-identically at the
+ *  current atlas. New call sites should pass `o.cols` so a runtime
+ *  `--cols` override flows into the break-even math too. */
+export function isCompressionProfitable(textLen: number, cols: number = DEFAULTS.cols): boolean {
+  const charsPerImage = maxCharsPerImage(cols);
+  const estImages = Math.max(1, Math.ceil(textLen / charsPerImage));
   const imageTokensCost = estImages * TOKENS_PER_IMAGE;
   const textTokensEquivalent = textLen / CHARS_PER_TOKEN;
   return imageTokensCost < textTokensEquivalent;
@@ -196,6 +228,11 @@ export interface TransformInfo {
    *      returned false (image cost ≥ text cost at current cell config)
    *  Only emitted when at least one counter is > 0. */
   passthroughReasons?: { below_threshold?: number; not_profitable?: number };
+  /** Number of tool_result blocks where the source text exceeded the
+   *  per-tool_result image budget and was truncated before rendering. */
+  truncatedToolResults?: number;
+  /** Total chars elided by paging across all tool_results this request. */
+  omittedChars?: number;
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -647,6 +684,204 @@ function makeImageBlock(pngB64: string, ephemeral = false): ImageBlock {
  *  Also returns the total `droppedChars` across all rendered images plus the
  *  merged codepoint→count map so the caller can fold both into the request's
  *  `info.droppedChars` / `info.droppedCodepointsTop`. */
+
+// --- paging / truncation -------------------------------------------------
+//
+// Anthropic's API caps a request at 100 images. A single huge tool_result
+// (find over a big tree, multi-MB log dump) can blow that cap by itself.
+// To keep the request valid AND not waste tokens on dozens of bottom-of-log
+// images, we truncate the source text before render with a marker that
+// tells the model what was elided.
+
+/** Visual rows a single input line will consume after soft-wrap at `cols`. */
+function lineRows(line: string, cols: number): number {
+  return Math.max(1, Math.ceil(line.length / cols));
+}
+
+/** Count the visual rows `text` will consume after soft-wrap at `cols`. */
+function countVisualRows(text: string, cols: number): number {
+  let rows = 0;
+  let lineStart = 0;
+  const len = text.length;
+  for (let i = 0; i <= len; i++) {
+    if (i === len || text.charCodeAt(i) === 10 /* \n */) {
+      const lineLen = i - lineStart;
+      rows += Math.max(1, Math.ceil(lineLen / cols));
+      lineStart = i + 1;
+    }
+  }
+  return rows;
+}
+
+/** Estimate how many images `text` will render to at the given column width.
+ *  Counts soft-wrapped visual rows, which is what render.ts actually budgets
+ *  against. Exported for tests + the paging gate. */
+export function estimateImageCount(textOrLen: string | number, cols: number): number {
+  if (typeof textOrLen === 'number') {
+    // Back-compat shim — numeric arg gets the looser chars-based estimate.
+    return Math.max(1, Math.ceil(textOrLen / Math.max(1, maxCharsPerImage(cols))));
+  }
+  const rows = countVisualRows(textOrLen, cols);
+  return Math.max(1, Math.ceil(rows / LINES_PER_IMAGE));
+}
+
+/** Classify content so we can pick a truncation strategy. Cheap heuristics on
+ *  the first ~4 KiB. Returns:
+ *    - `'structured'`: JSON/YAML/diff markers at the top. Truncate tail.
+ *    - `'log'`: ≥30% of lines start with a log level or timestamp. Truncate middle.
+ *    - `'other'`: prose, file dumps, etc. Truncate middle.
+ *  Exported for tests. */
+export function classifyContent(text: string): 'structured' | 'log' | 'other' {
+  const head = text.slice(0, 4096);
+  const trimmed = head.trimStart();
+  if (trimmed.startsWith('{') && /^\{\s*("|\})/.test(trimmed)) return 'structured';
+  if (trimmed.startsWith('[') && /^\[\s*("|\{|\[|-?\d|true\b|false\b|null\b|\])/.test(trimmed))
+    return 'structured';
+  if (trimmed.startsWith('---\n') || trimmed.startsWith('---\r\n')) return 'structured';
+  if (trimmed.startsWith('diff --git ') || /^---\s+\S/.test(trimmed)) return 'structured';
+  const lines = head.split('\n').slice(0, 40).filter((l) => l.length > 0);
+  if (lines.length < 4) return 'other';
+  const LOG_LINE =
+    /^(\[?(DEBUG|INFO|WARN|WARNING|ERROR|TRACE|FATAL)\]?\b|\d{4}-\d{2}-\d{2}[T ]?|\d{2}:\d{2}:\d{2}\b)/;
+  let logHits = 0;
+  for (const line of lines) if (LOG_LINE.test(line)) logHits++;
+  if (logHits / lines.length >= 0.3) return 'log';
+  return 'other';
+}
+
+/** Build the paging marker text. The model sees this verbatim INSIDE the
+ *  rendered image so it can reason about what was elided. */
+function buildPagingMarker(args: {
+  originalChars: number;
+  originalLines: number;
+  originalEstImages: number;
+  shownHeadLines: number;
+  shownTailLines: number;
+  omittedLines: number;
+  omittedChars: number;
+}): string {
+  const tailNote =
+    args.shownTailLines > 0
+      ? ` Showing first ${args.shownHeadLines} lines and last ${args.shownTailLines} lines.`
+      : ` Showing first ${args.shownHeadLines} lines (tail elided).`;
+  return (
+    `\n\n[ pixelpipe paging: omitted ${args.omittedLines.toLocaleString('en-US')} lines ` +
+    `(${args.omittedChars.toLocaleString('en-US')} chars) of content here. ` +
+    `Original length: ${args.originalChars.toLocaleString('en-US')} chars ` +
+    `(${args.originalLines.toLocaleString('en-US')} lines, ~${args.originalEstImages} images).` +
+    `${tailNote} ]\n\n`
+  );
+}
+
+/** Truncate `text` so it renders to roughly `maxImages` images at the given
+ *  `cols`. Picks head/tail split based on `classifyContent`. Budget measured
+ *  in visual rows (what render.ts actually slices on). Returns the truncated
+ *  text (with paging marker embedded) and the count of chars omitted. If
+ *  `text` already fits, returns unchanged with `omittedChars: 0`. Exported
+ *  for tests. */
+export function truncateForBudget(
+  text: string,
+  maxImages: number,
+  cols: number,
+): { text: string; omittedChars: number; truncated: boolean } {
+  const estImages = estimateImageCount(text, cols);
+  if (estImages <= maxImages) return { text, omittedChars: 0, truncated: false };
+  const totalRowBudget = Math.max(8, maxImages * LINES_PER_IMAGE - 6);
+  const shape = classifyContent(text);
+  const lines = text.split('\n');
+  const originalLines = lines.length;
+  const originalChars = text.length;
+
+  if (shape === 'structured') {
+    let rows = 0;
+    let cut = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const r = lineRows(lines[i]!, cols);
+      if (rows + r > totalRowBudget) break;
+      rows += r;
+      cut = i + 1;
+    }
+    if (cut === 0) cut = 1;
+    const head = lines.slice(0, cut).join('\n');
+    const omitted = originalChars - head.length;
+    return {
+      text:
+        head +
+        buildPagingMarker({
+          originalChars,
+          originalLines,
+          originalEstImages: estImages,
+          shownHeadLines: cut,
+          shownTailLines: 0,
+          omittedLines: originalLines - cut,
+          omittedChars: omitted,
+        }),
+      omittedChars: omitted,
+      truncated: true,
+    };
+  }
+
+  // log / other: 60% head, 40% tail.
+  const headRowBudget = Math.floor(totalRowBudget * 0.6);
+  const tailRowBudget = totalRowBudget - headRowBudget;
+  let headRows = 0;
+  let headCut = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const r = lineRows(lines[i]!, cols);
+    if (headRows + r > headRowBudget) break;
+    headRows += r;
+    headCut = i + 1;
+  }
+  if (headCut === 0) headCut = 1;
+  let tailRows = 0;
+  let tailStart = lines.length;
+  for (let i = lines.length - 1; i >= headCut; i--) {
+    const r = lineRows(lines[i]!, cols);
+    if (tailRows + r > tailRowBudget) break;
+    tailRows += r;
+    tailStart = i;
+  }
+  if (tailStart <= headCut || tailStart >= lines.length) {
+    const head = lines.slice(0, headCut).join('\n');
+    const omitted = originalChars - head.length;
+    return {
+      text:
+        head +
+        buildPagingMarker({
+          originalChars,
+          originalLines,
+          originalEstImages: estImages,
+          shownHeadLines: headCut,
+          shownTailLines: 0,
+          omittedLines: originalLines - headCut,
+          omittedChars: omitted,
+        }),
+      omittedChars: omitted,
+      truncated: true,
+    };
+  }
+  const headText = lines.slice(0, headCut).join('\n');
+  const tailText = lines.slice(tailStart).join('\n');
+  const shownChars = headText.length + tailText.length;
+  const omitted = originalChars - shownChars;
+  return {
+    text:
+      headText +
+      buildPagingMarker({
+        originalChars,
+        originalLines,
+        originalEstImages: estImages,
+        shownHeadLines: headCut,
+        shownTailLines: lines.length - tailStart,
+        omittedLines: originalLines - headCut - (lines.length - tailStart),
+        omittedChars: omitted,
+      }) +
+      tailText,
+    omittedChars: omitted,
+    truncated: true,
+  };
+}
+
 async function textToImageBlocks(
   text: string,
   cols: number,
@@ -823,7 +1058,7 @@ export async function transformRequest(
   // usually 25-30 KB so it always passes (1 image @ 2500 tokens < 25000/4 =
   // 6250 text-equivalent tokens), but the check guards against the edge
   // case where a tiny tool docs + tiny static slab combine to <10k chars.
-  if (!isCompressionProfitable(combined.length)) {
+  if (!isCompressionProfitable(combined.length, o.cols)) {
     info.reason = `not_profitable (slab=${combined.length} chars)`;
     bumpPassthrough(info, 'not_profitable');
     return { body, info };
@@ -917,7 +1152,7 @@ export async function transformRequest(
             processedExisting.push(blk);
             continue;
           }
-          if (!isCompressionProfitable(textLen)) {
+          if (!isCompressionProfitable(textLen, o.cols)) {
             // Above threshold but image cost ≥ text cost. Net loss to compress.
             bumpPassthrough(info, 'not_profitable');
             processedExisting.push(blk);
@@ -976,12 +1211,18 @@ export async function transformRequest(
               if (inner.length < o.minToolResultChars) {
                 bumpPassthrough(info, 'below_threshold');
                 rewritten.push(blk);
-              } else if (!isCompressionProfitable(inner.length)) {
+              } else if (!isCompressionProfitable(inner.length, o.cols)) {
                 bumpPassthrough(info, 'not_profitable');
                 rewritten.push(blk);
               } else {
+                // Paging: truncate before render if it would blow the image cap.
+                const paged = truncateForBudget(inner, o.maxImagesPerToolResult, o.cols);
+                if (paged.truncated) {
+                  info.truncatedToolResults = (info.truncatedToolResults ?? 0) + 1;
+                  info.omittedChars = (info.omittedChars ?? 0) + paged.omittedChars;
+                }
                 const { blocks: imgs, droppedChars, droppedCodepoints: dcp } =
-                  await textToImageBlocks(inner, o.cols);
+                  await textToImageBlocks(paged.text, o.cols);
                 for (const img of imgs) info.imageBytes += approxBlockBytes(img);
                 info.toolResultImgs = (info.toolResultImgs ?? 0) + imgs.length;
                 info.imageCount += imgs.length;
@@ -1010,13 +1251,18 @@ export async function transformRequest(
                   newInner.push(ib as TextBlock | ImageBlock);
                   continue;
                 }
-                if (!isCompressionProfitable(innerText.length)) {
+                if (!isCompressionProfitable(innerText.length, o.cols)) {
                   bumpPassthrough(info, 'not_profitable');
                   newInner.push(ib as TextBlock | ImageBlock);
                   continue;
                 }
+                const paged = truncateForBudget(innerText, o.maxImagesPerToolResult, o.cols);
+                if (paged.truncated) {
+                  info.truncatedToolResults = (info.truncatedToolResults ?? 0) + 1;
+                  info.omittedChars = (info.omittedChars ?? 0) + paged.omittedChars;
+                }
                 const { blocks: imgs, droppedChars, droppedCodepoints: dcp } =
-                  await textToImageBlocks(innerText, o.cols);
+                  await textToImageBlocks(paged.text, o.cols);
                 for (const img of imgs) {
                   newInner.push(img);
                   info.imageBytes += approxBlockBytes(img);

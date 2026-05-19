@@ -6,7 +6,7 @@ import {
   minifyForRender,
 } from '../src/core/render.js';
 import { encodeGrayPng, bytesToBase64 } from '../src/core/png.js';
-import { transformRequest, isCompressionProfitable } from '../src/core/transform.js';
+import { transformRequest, isCompressionProfitable, maxCharsPerImage } from '../src/core/transform.js';
 import {
   atlasRank,
   ATLAS_CELL_H,
@@ -1497,6 +1497,53 @@ describe('transform', () => {
 
   it('isCompressionProfitable: true at 40000 chars (3 images, clear win)', () => {
     expect(isCompressionProfitable(40000)).toBe(true);
+  });
+
+  // --- Adaptive break-even: CHARS_PER_IMAGE derived from atlas cell, not hardcoded ---
+  // Brief: when font-rater swaps to a smaller cell (e.g. Cozette 4×7), more chars
+  // pack into one image, so the N-image break-even thresholds shift. Tests below
+  // verify both the regression case (current Unifont 5×11) AND that the formula
+  // responds to `cols` (which scales chars/image linearly the same way a smaller
+  // cell-H would).
+
+  it('maxCharsPerImage: matches the historic 14,100 constant at the shipping config', () => {
+    // Unifont 5×11, cols=100 → floor((1568−8)/11) × 100 = 141 × 100 = 14,100.
+    // If this ever drifts, every break-even test downstream needs re-pinning.
+    expect(maxCharsPerImage(100)).toBe(14_100);
+  });
+
+  it('maxCharsPerImage: scales linearly with cols (same atlas)', () => {
+    expect(maxCharsPerImage(50)).toBe(7_050);
+    expect(maxCharsPerImage(200)).toBe(28_200);
+  });
+
+  it('isCompressionProfitable: doubling cols halves the 2-image break-even threshold', () => {
+    // At cols=100, CHARS_PER_IMAGE=14,100. 20,000 chars needs 2 images (cost
+    // 5000 tokens) vs 5000 text-tokens → tied, strict `<` returns false.
+    expect(isCompressionProfitable(20_000, 100)).toBe(false);
+    // At cols=200, CHARS_PER_IMAGE=28,200. 20,000 chars fits in 1 image
+    // (cost 2500 tokens) vs 5000 text-tokens → clear win.
+    expect(isCompressionProfitable(20_000, 200)).toBe(true);
+  });
+
+  it('isCompressionProfitable: tiny-cols config raises the break-even threshold', () => {
+    // Simulated narrow render: cols=20 → CHARS_PER_IMAGE=2820. A 10,001-char
+    // block needs ceil(10001/2820)=4 images (10,000 tokens) vs 2500 text →
+    // huge net loss. At cols=100 the same block was profitable.
+    expect(isCompressionProfitable(10_001, 100)).toBe(true);
+    expect(isCompressionProfitable(10_001, 20)).toBe(false);
+  });
+
+  it('isCompressionProfitable: smaller-cell atlas (Cozette-shape) would let 16k blocks become 1-image wins (cols proxy)', () => {
+    // True smaller-cell test would need to mock ATLAS_CELL_H. We use cols as
+    // a proxy since CHARS_PER_IMAGE = cols × floor((1568−8)/cell_H) — doubling
+    // cols at fixed cell_H is mathematically the same as halving cell_H at
+    // fixed cols. A Cozette 4×7 cell at cols=100 yields floor(1560/7)×100 =
+    // 22,200 chars/image, ~57% more than today. Equivalent: cols=157 at the
+    // current cell. A 16,000-char block needs 2 images today (2-image break-
+    // even fails); at the equivalent Cozette-shape config it fits in 1.
+    expect(isCompressionProfitable(16_000, 100)).toBe(false); // 2 imgs @ 5000 vs 4000 text
+    expect(isCompressionProfitable(16_000, 157)).toBe(true); // 1 img @ 2500 vs 4000 text
   });
 
   it('break-even gate: 7000-char tool_result stays as text (below break-even)', async () => {

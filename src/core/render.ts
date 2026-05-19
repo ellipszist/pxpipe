@@ -22,10 +22,15 @@ import {
 } from './atlas.js';
 import { encodeGrayPng } from './png.js';
 
-const MAX_HEIGHT_PX = 1568;
+/** Vertical pixel budget per rendered PNG. Bounded by Anthropic's 1568×1568
+ *  image cap. Exported so the break-even gate in transform.ts can derive
+ *  CHARS_PER_IMAGE from the same constants the renderer actually uses. */
+export const MAX_HEIGHT_PX = 1568;
 const DEFAULT_COLS = 100;
 const PAD_X = 4;
-const PAD_Y = 4;
+/** Vertical padding inside the rendered PNG (top + bottom each). Exported
+ *  for the same reason as MAX_HEIGHT_PX. */
+export const PAD_Y = 4;
 
 export interface RenderedImage {
   /** Raw PNG bytes. */
