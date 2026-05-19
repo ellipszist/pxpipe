@@ -529,8 +529,8 @@ describe('transform', () => {
     expect(info.imageCount).toBeGreaterThanOrEqual(1);
 
     const out = JSON.parse(new TextDecoder().decode(body));
-    // Default placement is 'user' — images go into the first user message,
-    // not the system field (Anthropic rejects image blocks in `system`).
+    // Images always go into the first user message, not the system field
+    // (Anthropic rejects image blocks in `system`).
     const userContent = out.messages[0].content as any[];
     expect(Array.isArray(userContent)).toBe(true);
     const imageBlocks = userContent.filter((b: any) => b.type === 'image');
@@ -1125,9 +1125,9 @@ describe('transform', () => {
     expect(info.staticChars).toBeGreaterThan(info.dynamicChars);
 
     const out = JSON.parse(new TextDecoder().decode(outBytes));
-    // With placement='user' (the default), images live in the first user
-    // message and the dynamic <env> block is kept as text in the system
-    // field — so cache_control on the image is unaffected by env drift.
+    // Images live in the first user message and the dynamic <env> block is
+    // kept as text in the system field — so cache_control on the image is
+    // unaffected by env drift.
     const userContent = out.messages[0].content as any[];
     const sysBlocks = (Array.isArray(out.system) ? out.system : []) as any[];
 
@@ -1135,7 +1135,7 @@ describe('transform', () => {
     expect(hasImage).toBe(true);
 
     // <env> must show up as text somewhere outside the image — the dynamic
-    // tail. With 'user' placement that's the system field.
+    // tail lives in the system field as cheap text.
     const allText = [...sysBlocks, ...userContent]
       .filter((b: any) => b.type === 'text')
       .map((b: any) => b.text)
@@ -1280,8 +1280,7 @@ describe('transform', () => {
     );
     // Compare image PNG bytes only — the request envelope wraps the same
     // bytes but JSON ordering is deterministic too, so the whole body should
-    // match. Default placement is 'user', so the images live in the first
-    // user message.
+    // match. Images live in the first user message.
     const ua = (JSON.parse(new TextDecoder().decode(a.body)).messages[0].content ?? []) as any[];
     const ub = (JSON.parse(new TextDecoder().decode(b.body)).messages[0].content ?? []) as any[];
     const imgsA = ua.filter((x: any) => x.type === 'image').map((x: any) => x.source.data);

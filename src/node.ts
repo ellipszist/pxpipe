@@ -41,7 +41,6 @@ interface CliOpts {
   minCompressChars: number;
   minReminderChars: number;
   minToolResultChars: number;
-  placement: 'system' | 'user';
   cols: number;
   /** R2 multi-column packing — default 1 (off). 2 squeezes ~2× source rows
    *  per image; needs OCR verification before being made the default. */
@@ -81,7 +80,6 @@ function parseCli(argv: string[]): CliOpts {
     // fast-path skip for the obvious-no cases. Keep in sync with DEFAULTS.
     minReminderChars: Number(process.env.MIN_REMINDER_CHARS ?? 10000),
     minToolResultChars: Number(process.env.MIN_TOOL_RESULT_CHARS ?? 10000),
-    placement: (process.env.PLACEMENT as 'system' | 'user') ?? 'user',
     cols: Number(process.env.COLS ?? 100),
     // R2 multi-column ON (2 cols) — single-col drops below break-even on
     // real tool-doc slabs. Override via MULTI_COL=1 or `--multi-col 1`.
@@ -110,7 +108,6 @@ function parseCli(argv: string[]): CliOpts {
       case '--min-chars':      o.minCompressChars = Number(eat()); break;
       case '--min-reminder-chars': o.minReminderChars = Number(eat()); break;
       case '--min-tool-result-chars': o.minToolResultChars = Number(eat()); break;
-      case '--placement':      o.placement = eat() as 'system' | 'user'; break;
       case '--cols':           o.cols = Number(eat()); break;
       case '--multi-col':      o.multiCol = Math.max(1, Number(eat()) | 0); break;
       case '--no-track':       o.track = false; break;
@@ -148,8 +145,6 @@ Options:
       --min-chars <N>     skip system compression below this many chars (default 2000)
       --min-reminder-chars <N>  per-block fast-skip threshold for reminders (default 10000)
       --min-tool-result-chars <N>  per-block fast-skip threshold for tool_results (default 10000)
-      --placement <where> 'system' or 'user' (default user; 'system' is
-                          rejected by the API for image blocks)
       --cols <N>          soft-wrap column count (default 100)
       --multi-col <N>     R2: pack N text columns per image (default 2;
                           set to 1 to disable. Higher N may exceed the
@@ -162,7 +157,7 @@ Options:
 Environment:
   Same as flags via PORT, ANTHROPIC_UPSTREAM, COMPRESS, COMPRESS_TOOLS,
   COMPRESS_SCHEMAS, COMPRESS_REMINDERS, COMPRESS_TOOL_RESULTS,
-  MIN_COMPRESS_CHARS, MIN_REMINDER_CHARS, MIN_TOOL_RESULT_CHARS, PLACEMENT,
+  MIN_COMPRESS_CHARS, MIN_REMINDER_CHARS, MIN_TOOL_RESULT_CHARS,
   COLS, MULTI_COL, PIXELPIPE_TRACK, PIXELPIPE_LOG.
 
 Use with Claude Code:
@@ -496,7 +491,6 @@ async function main(): Promise<void> {
     minCompressChars: opts.minCompressChars,
     minReminderChars: opts.minReminderChars,
     minToolResultChars: opts.minToolResultChars,
-    placement: opts.placement,
     cols: opts.cols,
     multiCol: opts.multiCol,
   };
@@ -614,7 +608,7 @@ async function main(): Promise<void> {
   server.listen(opts.port, () => {
     console.log(`[pixelpipe] listening on http://127.0.0.1:${opts.port} → ${opts.upstream}`);
     console.log(
-      `[pixelpipe] config: compress=${opts.compress} tools=${opts.compressTools} schemas=${opts.compressSchemas} reminders=${opts.compressReminders} tool_results=${opts.compressToolResults} history=${opts.compressHistory} min=${opts.minCompressChars} placement=${opts.placement} cols=${opts.cols} multi_col=${opts.multiCol}`,
+      `[pixelpipe] config: compress=${opts.compress} tools=${opts.compressTools} schemas=${opts.compressSchemas} reminders=${opts.compressReminders} tool_results=${opts.compressToolResults} history=${opts.compressHistory} min=${opts.minCompressChars} cols=${opts.cols} multi_col=${opts.multiCol}`,
     );
     if (opts.track) console.log(`[pixelpipe] tracking events → ${opts.eventsFile}`);
     else console.log('[pixelpipe] tracking disabled (--no-track or PIXELPIPE_TRACK=0)');

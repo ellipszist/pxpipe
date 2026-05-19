@@ -33,8 +33,6 @@ import { collapseHistory } from './history.js';
 export interface TransformOptions {
   /** Master switch — false makes this a no-op pass-through. */
   compress?: boolean;
-  /** Compress the system field. */
-  compressSystem?: boolean;
   /** Move tool descriptions into the same image (and stub the originals). */
   compressTools?: boolean;
   /** Include full input_schema JSON for each tool. Adds tokens but maximizes parity. */
@@ -53,8 +51,6 @@ export interface TransformOptions {
   minReminderChars?: number;
   /** Per-block threshold for compressToolResults (chars). */
   minToolResultChars?: number;
-  /** Where to attach the image block — system field, or first user message. */
-  placement?: 'system' | 'user';
   /** Soft-wrap column count. */
   cols?: number;
   /** Hard upper bound on images emitted per single tool_result. Above this,
@@ -91,7 +87,6 @@ export interface TransformOptions {
 
 const DEFAULTS: Required<TransformOptions> = {
   compress: true,
-  compressSystem: true,
   compressTools: true,
   compressSchemas: true,
   compressReminders: true,
@@ -104,10 +99,11 @@ const DEFAULTS: Required<TransformOptions> = {
   // current cell config) so anything below it can't possibly net-save.
   minReminderChars: 10000,
   minToolResultChars: 10000,
-  // Anthropic's `system` field accepts text blocks only — image blocks there
-  // come back as `400 system.N.type: Input should be 'text'`. Images must go
-  // into a user message instead.
-  placement: 'user',
+  // NOTE: Anthropic's `system` field accepts text blocks only — image blocks
+  // there come back as `400 system.N.type: Input should be 'text'`. Images
+  // are always attached to the first user message; there's no flag for this
+  // because the system-field path is API-rejected. (Removed `placement` +
+  // `compressSystem` knobs that gated the dead system-field branch.)
   cols: 100,
   // Cap at 10 images per tool_result. With ~14k chars/image at current cell,
   // a single tool_result can grow to ~140k chars before paging kicks in. A
@@ -1302,18 +1298,11 @@ export async function transformRequest(
   if (billingLine) tailParts.push(billingLine);
   const tailText = tailParts.join('\n\n');
 
-  const newSystem: SystemField = [];
-  newSystem.push({ type: 'text', text: introText });
-  newSystem.push(...imageBlocks);
-  newSystem.push({ type: 'text', text: tailText });
-  if (Array.isArray(sysRemainder)) newSystem.push(...sysRemainder);
-
-  if (o.placement === 'system' && o.compressSystem) {
-    req.system = newSystem;
-  } else {
-    // Placement = user: image goes into the first user message; billing line
-    // and dynamic blocks stay in the system field as cheap text so the model
-    // still sees env / context info.
+  // Image blocks ALWAYS go into the first user message — Anthropic's `system`
+  // field rejects images with `400 system.N.type: Input should be 'text'`.
+  // The system field stays as cheap text (billing line + dynamic blocks +
+  // sysRemainder) so the model still sees env / context info.
+  {
     const sysTail: SystemField = [];
     if (billingLine) sysTail.push({ type: 'text', text: billingLine });
     if (dynamicText) sysTail.push({ type: 'text', text: dynamicText });

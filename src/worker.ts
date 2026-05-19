@@ -32,7 +32,6 @@ export interface Env {
   MIN_COMPRESS_CHARS?: string;
   MIN_REMINDER_CHARS?: string;
   MIN_TOOL_RESULT_CHARS?: string;
-  PLACEMENT?: string;
   COLS?: string;
   /** R2 multi-column packing — default 1 (off). 2 squeezes ~2× source rows
    *  per image; OCR-verify before flipping in production. */
@@ -67,7 +66,6 @@ export default {
       // skip for obvious-no cases. Keep in sync with DEFAULTS.
       minReminderChars: env.MIN_REMINDER_CHARS ? Number(env.MIN_REMINDER_CHARS) : 10000,
       minToolResultChars: env.MIN_TOOL_RESULT_CHARS ? Number(env.MIN_TOOL_RESULT_CHARS) : 10000,
-      placement: (env.PLACEMENT as 'system' | 'user') ?? 'user',
       cols: env.COLS ? Number(env.COLS) : 100,
       // R2 multi-column ON (2 cols) — single-col drops below break-even on
       // real tool-doc slabs. Override via MULTI_COL=1 if OCR misreads layout.
