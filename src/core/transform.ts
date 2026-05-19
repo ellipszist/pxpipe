@@ -124,12 +124,14 @@ const DEFAULTS: Required<TransformOptions> = {
   // `find` over a big tree or `grep -r` can easily exceed this; the paging
   // marker tells the model what was elided. Tuneable per session.
   maxImagesPerToolResult: 10,
-  // Variant C history-image: ON. Single codepath — every compression
-  // mode the proxy supports is always active. Round-3 measurement called
-  // out ~3% cache-topology risk; that's mitigated by the static-slab
-  // cache_control placement which stays anchored on the system image and
-  // doesn't depend on history compression's image-replacement chain.
-  compressHistory: true,
+  // Variant C history-image: OFF. Round-3 spec called this MARGINAL
+  // (~1× per-call) against HIGH cache-topology risk. Live measurement on
+  // 2026-05-19 confirmed the warning: with 128-turn history, replacing
+  // ~21k chars of text with ~140k tokens of imagery LOSES money on every
+  // request. The math in `baselineCost` correctly reports negative savings
+  // when imgTokensEst > txtReplaced. Re-enable per-deployment only after
+  // measuring a positive delta on your specific traffic shape.
+  compressHistory: false,
   historyKeepTail: 4,
   historyMinPrefix: 10,
   // English ~4 chars/tok default (= the CHARS_PER_TOKEN constant declared
