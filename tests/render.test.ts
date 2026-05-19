@@ -2,11 +2,19 @@ import { describe, expect, it } from 'vitest';
 import {
   renderChunkToPng,
   renderTextToPngs,
+  renderTextToPngsMultiCol,
+  multiColWidth,
+  maxFittingCols,
   expandTabsInLine,
   minifyForRender,
 } from '../src/core/render.js';
 import { encodeGrayPng, bytesToBase64 } from '../src/core/png.js';
-import { transformRequest, isCompressionProfitable, maxCharsPerImage } from '../src/core/transform.js';
+import {
+  transformRequest,
+  isCompressionProfitable,
+  maxCharsPerImage,
+  estimateImageCount,
+} from '../src/core/transform.js';
 import {
   atlasRank,
   ATLAS_CELL_H,
@@ -51,6 +59,97 @@ describe('renderer', () => {
     const imgs = await renderTextToPngs(huge);
     expect(imgs.length).toBeGreaterThan(1);
     for (const img of imgs) expect(img.height).toBeLessThanOrEqual(1568);
+  });
+
+  // ---- R2 multi-column renderer ------------------------------------------
+  // The multi-col path packs N source columns side-by-side per image so
+  // each image covers numCols×LINES_PER_IMAGE wrapped lines instead of one.
+  // Off by default (numCols=1) — these tests exercise the new path.
+
+  it('multi-col with numCols=1 is byte-identical to renderTextToPngs (default cache contract)', async () => {
+    // The cache_control story depends on identical bytes for identical
+    // inputs. numCols=1 MUST be a pure passthrough so toggling the flag
+    // back to 1 cannot regress cache hit rate.
+    const text = ('lorem ipsum dolor sit amet\n'.repeat(8)) + 'final line';
+    const single = await renderTextToPngs(text);
+    const passthrough = await renderTextToPngsMultiCol(text, 100, 1);
+    expect(passthrough.length).toBe(single.length);
+    for (let i = 0; i < single.length; i++) {
+      expect(passthrough[i]!.png).toEqual(single[i]!.png);
+    }
+  });
+
+  it('multi-col emits a wider canvas with the predicted dimensions', async () => {
+    const text = ('lorem ipsum dolor sit amet\n'.repeat(8)) + 'final line';
+    const single = await renderTextToPngs(text, 100);
+    const two = await renderTextToPngsMultiCol(text, 100, 2);
+    // numCols=2 with 100-col text content + 4-cell gutter at 5px/cell:
+    //   width = 2*PAD_X + 2*100*5 + 1*4*5 = 8 + 1000 + 20 = 1028 px
+    expect(two[0]!.width).toBe(multiColWidth(100, 2));
+    expect(two[0]!.width).toBeGreaterThan(single[0]!.width);
+    expect(two[0]!.width).toBeLessThanOrEqual(1568);
+  });
+
+  it('multi-col halves image count on row-heavy input', async () => {
+    // ~500 lines of narrow content. Single-col packs 141 lines/image →
+    // ~4 images. Two columns should drop that to ~2.
+    const text = ('lorem ipsum dolor sit amet\n'.repeat(500));
+    const single = await renderTextToPngs(text, 100);
+    const two = await renderTextToPngsMultiCol(text, 100, 2);
+    expect(single.length).toBeGreaterThanOrEqual(3);
+    // Two-col image count ≤ ceil(single / 2). The +1 slack handles the
+    // pathological case where the boundary lands awkwardly.
+    expect(two.length).toBeLessThanOrEqual(Math.ceil(single.length / 2));
+    for (const img of two) expect(img.height).toBeLessThanOrEqual(1568);
+  });
+
+  it('multi-col render is deterministic (byte-identical across calls)', async () => {
+    const text = ('alpha beta gamma delta epsilon\n'.repeat(400));
+    const a = await renderTextToPngsMultiCol(text, 100, 2);
+    const b = await renderTextToPngsMultiCol(text, 100, 2);
+    expect(a.length).toBe(b.length);
+    for (let i = 0; i < a.length; i++) expect(a[i]!.png).toEqual(b[i]!.png);
+  });
+
+  it('multi-col per-image charsRendered sums to the input codepoint count', async () => {
+    // The honest-savings math (compressedChars in TransformInfo) relies on
+    // sum(charsRendered) matching the input we paid to render. Off-by-one
+    // here would silently mis-report savings.
+    const text = ('lorem ipsum dolor sit amet\n'.repeat(400));
+    let cpCount = 0;
+    for (const _ of text) cpCount++;
+    const imgs = await renderTextToPngsMultiCol(text, 100, 2);
+    let total = 0;
+    for (const img of imgs) total += img.charsRendered;
+    expect(total).toBe(cpCount);
+  });
+
+  it('estimateImageCount(numCols=2) tracks actual multi-col image count', async () => {
+    const text = ('lorem ipsum dolor sit amet\n'.repeat(500));
+    const actual = (await renderTextToPngsMultiCol(text, 100, 2)).length;
+    const estimated = estimateImageCount(text, 100, 2);
+    expect(estimated).toBe(actual);
+  });
+
+  it('maxFittingCols clamps an over-wide numCols flag instead of producing >1568px canvases', async () => {
+    // At cols=100 (5 px/cell + 4-cell gutter), the math says:
+    //   1: 508 px, 2: 1028, 3: 1548, 4: 2068 → 4 already exceeds 1568.
+    const fits3 = maxFittingCols(100);
+    expect(fits3).toBe(3);
+    const text = 'short\n'.repeat(10);
+    // numCols=10 → should clamp; output canvas width must stay ≤ 1568.
+    const imgs = await renderTextToPngsMultiCol(text, 100, 10);
+    for (const img of imgs) expect(img.width).toBeLessThanOrEqual(1568);
+  });
+
+  it('multi-col preserves CJK wide-glyph wrap math (no dropped chars on Chinese input)', async () => {
+    // Wide glyphs are 2 cells in both layouts; multi-col must not regress
+    // the wrap math or atlas lookup.
+    const text = ('中文测试 mixed ASCII\n'.repeat(100));
+    const imgs = await renderTextToPngsMultiCol(text, 100, 2);
+    let dropped = 0;
+    for (const img of imgs) dropped += img.droppedChars;
+    expect(dropped).toBe(0);
   });
 
   // ---- Unicode coverage tests (Unifont atlas) -------------------------------

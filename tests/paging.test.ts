@@ -358,8 +358,11 @@ describe('paging end-to-end (transformRequest)', () => {
     );
     const { info } = await transformRequest(req);
     expect(info.truncatedToolResults).toBe(2);
-    // Both should have been truncated → omittedChars roughly doubled.
-    expect(info.omittedChars).toBeGreaterThan(800_000 - 30_000);
+    // Both should have been truncated → omittedChars roughly doubled. The
+    // exact bound depends on renderer config: at multiCol=1 each image
+    // packs ~14k chars worst-case, multiCol=2 packs ~28k → less omitted
+    // at the same maxImagesPerToolResult cap. Threshold below covers both.
+    expect(info.omittedChars).toBeGreaterThan(700_000);
   });
 
   it('handles array-shaped tool_result content', async () => {

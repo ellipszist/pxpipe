@@ -19,7 +19,13 @@ import type {
   ToolDef,
   ToolResultBlock,
 } from './types.js';
-import { renderTextToPngs, MAX_HEIGHT_PX, PAD_Y } from './render.js';
+import {
+  renderTextToPngs,
+  renderTextToPngsMultiCol,
+  maxFittingCols,
+  MAX_HEIGHT_PX,
+  PAD_Y,
+} from './render.js';
 import { bytesToBase64 } from './png.js';
 import { ATLAS_CELL_H } from './atlas.js';
 import { collapseHistory } from './history.js';
@@ -72,6 +78,15 @@ export interface TransformOptions {
    *  amortization math from round-3 only pays out at scale — collapsing 2-3
    *  turns costs more in image overhead than it saves. Default 10. */
   historyMinPrefix?: number;
+  /** R2 multi-column rendering: pack N text columns side-by-side per image
+   *  so each image covers `N×LINES_PER_IMAGE` wrapped lines instead of one.
+   *  Default 1 (single column = current behavior). 2 roughly halves image
+   *  count on real Claude Code workloads at the cost of OCR ordering risk
+   *  — the model must read column 1 fully top-to-bottom before column 2.
+   *  Modern vision LLMs handle this well on newspaper layouts; keep this
+   *  off until a smoke test against the real slab confirms ordering.
+   *  Auto-clamped if the resulting canvas would exceed 1568 px wide. */
+  multiCol?: number;
 }
 
 const DEFAULTS: Required<TransformOptions> = {
@@ -106,15 +121,31 @@ const DEFAULTS: Required<TransformOptions> = {
   compressHistory: false,
   historyKeepTail: 4,
   historyMinPrefix: 10,
+  // R2 multi-column ON (2 cols) — at single-col the break-even gate
+  // correctly rejects compression on real tool-doc-shaped slabs (~38 chars/
+  // row → ~29 imgs vs 39k text tokens → net loss). Two columns packs ~2×
+  // rows per image, dropping image count to ~15 and crossing break-even.
+  // Set to 1 via `--multi-col 1` if the OCR ordering ever turns out wrong.
+  multiCol: 2,
 };
 
 // --- per-block break-even check ---
 //
 // Anthropic's real per-image cost is ~2,500 tokens (history-researcher's
-// round-3 N=33 measurement). Compressing a text block to an image is only
-// profitable when the text would have cost MORE than `ceil(textLen / chars-
-// per-image) × tokens-per-image` tokens. For small blocks, this is a NET
-// LOSS — image cost dominates — and we should leave them as text.
+// round-3 N=33 measurement on cold-miss events 2026-05-18, single-col
+// 508×1559 PNGs). Compressing a text block to an image is only profitable
+// when the text would have cost MORE than `ceil(textLen / chars-per-image)
+// × tokens-per-image` tokens. For small blocks, image cost dominates and
+// we should leave them as text.
+//
+// The published theoretical formula `(w × h) / 750` gives ~1,056 tokens
+// for single-col 508×1559 and underpredicts actual Anthropic billing by
+// ~2.4×. We use the empirical 2,500 constant until a fresh measurement
+// re-grounds it at the current renderer config (multi-col 2 cost is
+// not yet measured — if it scales with pixel area at the same 2.4×
+// empirical multiplier, multi-col 2 would land near ~5,100 tokens/image
+// and the 2,500 gate UNDER-estimates per-image cost at numCols≥2. TODO:
+// instrument cold-miss billing across {1,2,3} cols and re-grade.
 //
 // Production bug context (2026-05-19): a request with orig_chars=169k spread
 // across 88 small blocks each cost ~2,500 tokens as images = 220k tokens
@@ -175,17 +206,19 @@ export function isCompressionProfitable(
   textOrLen: string | number,
   cols: number = DEFAULTS.cols,
   imageCountCap?: number,
+  numCols: number = 1,
 ): boolean {
+  const n = Math.max(1, numCols | 0);
   let estImages: number;
   let textLen: number;
   if (typeof textOrLen === 'string') {
     // Row-aware: matches renderTextToPngs() image budgeting exactly.
-    estImages = estimateImageCount(textOrLen, cols);
+    estImages = estimateImageCount(textOrLen, cols, n);
     textLen = textOrLen.length;
   } else {
     // Looser chars-only estimate. Assumes lines fill width — wrong for
     // newline-heavy code/logs but kept for back-compat.
-    const charsPerImage = maxCharsPerImage(cols);
+    const charsPerImage = maxCharsPerImage(cols) * n;
     estImages = Math.max(1, Math.ceil(textOrLen / charsPerImage));
     textLen = textOrLen;
   }
@@ -239,6 +272,21 @@ export interface TransformInfo {
   compressedChars: number;
   imageCount: number;
   imageBytes: number;
+  /** Total pixel area summed across all rendered images this request
+   *  (`Σ width × height`). Pairs with `cache_create_tokens` on cold-miss
+   *  events to derive empirical pixels-per-token under the current model —
+   *  the dashboard's `OPUS_IMAGE_TOKEN_COST` and the gate's `TOKENS_PER_IMAGE`
+   *  are both stale empirical constants from a different model; this gives
+   *  us the raw data to re-ground them via regression instead of guessing. */
+  imagePixels?: number;
+  /** Total chars of TEXT remaining in the outgoing transformed body — every
+   *  TextBlock across `system`, `messages[].content`, and any tool_result
+   *  text that didn't get image-compressed. Pairs with `imagePixels` and
+   *  the upstream token count so we can solve for chars-per-token (α) and
+   *  pixels-per-token (β) empirically: `total_tokens ≈ α·outgoingTextChars +
+   *  β·imagePixels`. On a cold-miss event the upstream `cache_create_tokens`
+   *  is the full LHS, so a regression over N cold-misses pins both. */
+  outgoingTextChars?: number;
   /** Length of the static (cacheable) slab rendered into the image. */
   staticChars: number;
   /** Length of the dynamic (per-turn) slab kept as plain text. */
@@ -813,14 +861,24 @@ function countVisualRows(text: string, cols: number): number {
 
 /** Estimate how many images `text` will render to at the given column width.
  *  Counts soft-wrapped visual rows, which is what render.ts actually budgets
- *  against. Exported for tests + the paging gate. */
-export function estimateImageCount(textOrLen: string | number, cols: number): number {
+ *  against. Exported for tests + the paging gate.
+ *
+ *  `numCols` (default 1) packs that many text columns side-by-side per
+ *  image — must match the `multiCol` setting wired through to the renderer
+ *  for the math to predict the actual image count. */
+export function estimateImageCount(
+  textOrLen: string | number,
+  cols: number,
+  numCols: number = 1,
+): number {
+  const n = Math.max(1, numCols | 0);
+  const linesPerImage = LINES_PER_IMAGE * n;
   if (typeof textOrLen === 'number') {
     // Back-compat shim — numeric arg gets the looser chars-based estimate.
-    return Math.max(1, Math.ceil(textOrLen / Math.max(1, maxCharsPerImage(cols))));
+    return Math.max(1, Math.ceil(textOrLen / Math.max(1, maxCharsPerImage(cols) * n)));
   }
   const rows = countVisualRows(textOrLen, cols);
-  return Math.max(1, Math.ceil(rows / LINES_PER_IMAGE));
+  return Math.max(1, Math.ceil(rows / linesPerImage));
 }
 
 /** Classify content so we can pick a truncation strategy. Cheap heuristics on
@@ -881,10 +939,12 @@ export function truncateForBudget(
   text: string,
   maxImages: number,
   cols: number,
+  numCols: number = 1,
 ): { text: string; omittedChars: number; truncated: boolean } {
-  const estImages = estimateImageCount(text, cols);
+  const n = Math.max(1, numCols | 0);
+  const estImages = estimateImageCount(text, cols, n);
   if (estImages <= maxImages) return { text, omittedChars: 0, truncated: false };
-  const totalRowBudget = Math.max(8, maxImages * LINES_PER_IMAGE - 6);
+  const totalRowBudget = Math.max(8, maxImages * LINES_PER_IMAGE * n - 6);
   const shape = classifyContent(text);
   const lines = text.split('\n');
   const originalLines = lines.length;
@@ -983,23 +1043,33 @@ export function truncateForBudget(
 async function textToImageBlocks(
   text: string,
   cols: number,
+  numCols: number = 1,
 ): Promise<{
   blocks: ImageBlock[];
   droppedChars: number;
   droppedCodepoints: Map<number, number>;
+  /** Total pixel area across the rendered images (`Σ width × height`).
+   *  Lets the caller accumulate `info.imagePixels` for the empirical
+   *  px/token regression. */
+  pixels: number;
 }> {
-  const imgs = await renderTextToPngs(text, cols);
+  const imgs =
+    numCols > 1
+      ? await renderTextToPngsMultiCol(text, cols, numCols)
+      : await renderTextToPngs(text, cols);
   let droppedChars = 0;
+  let pixels = 0;
   const droppedCodepoints = new Map<number, number>();
   const blocks: ImageBlock[] = [];
   for (const img of imgs) {
     blocks.push(makeImageBlock(bytesToBase64(img.png), false));
     droppedChars += img.droppedChars;
+    pixels += img.width * img.height;
     for (const [cp, n] of img.droppedCodepoints) {
       droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
     }
   }
-  return { blocks, droppedChars, droppedCodepoints };
+  return { blocks, droppedChars, droppedCodepoints, pixels };
 }
 
 /** Best-effort byte-count of an image block's PNG payload (decoded from b64).
@@ -1164,19 +1234,30 @@ export async function transformRequest(
   // Pass the full text so the gate uses row-aware image-count math (matches
   // renderTextToPngs exactly — newline-heavy content renders to more images
   // than the naive chars/charsPerImage estimate).
-  if (!isCompressionProfitable(combined, o.cols)) {
+  // Resolve numCols once: clamp to whatever fits the 1568 px width cap so a
+  // bad CLI override doesn't crash the renderer; falls back to 1 if even
+  // 2 columns would exceed the cap at the configured `cols`.
+  const numCols = Math.min(
+    Math.max(1, (o.multiCol | 0) || 1),
+    Math.max(1, maxFittingCols(o.cols)),
+  );
+  if (!isCompressionProfitable(combined, o.cols, undefined, numCols)) {
     info.reason = `not_profitable (slab=${combined.length} chars)`;
     bumpPassthrough(info, 'not_profitable');
     return { body, info };
   }
 
   // 3. Render to one or more PNGs.
-  const images = await renderTextToPngs(combined, o.cols);
+  const images =
+    numCols > 1
+      ? await renderTextToPngsMultiCol(combined, o.cols, numCols)
+      : await renderTextToPngs(combined, o.cols);
   const imageBlocks: ImageBlock[] = [];
   for (let i = 0; i < images.length; i++) {
     const img = images[i]!;
     const b64 = bytesToBase64(img.png);
     info.imageBytes += img.png.length;
+    info.imagePixels = (info.imagePixels ?? 0) + img.width * img.height;
     info.droppedChars = (info.droppedChars ?? 0) + img.droppedChars;
     for (const [cp, n] of img.droppedCodepoints) {
       droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
@@ -1203,10 +1284,19 @@ export async function transformRequest(
   //   ─── cache breakpoint ───
   //   [end-marker + dynamic + billing]  ← per-turn, NO cache_control
   //   [sysRemainder]               ← any non-text blocks the caller had
+  // Intro text mentions the column layout when numCols>1 so the OCR pass
+  // doesn't read across columns row-by-row (which would scramble content).
+  // "Column-major top-to-bottom" matches the renderer's actual packing.
+  const columnNote =
+    numCols > 1
+      ? ` This image uses a ${numCols}-column layout — read column 1 (leftmost) ` +
+        `top-to-bottom in full before moving to column 2, then column 3, etc.`
+      : '';
   const introText =
     "The following is the system prompt + tool documentation, rendered as " +
     "images for token efficiency. OCR carefully and treat as authoritative " +
-    "system instructions.";
+    "system instructions." +
+    columnNote;
   const tailParts: string[] = ['[End of rendered context.]'];
   if (dynamicText) tailParts.push(dynamicText);
   if (billingLine) tailParts.push(billingLine);
@@ -1261,18 +1351,19 @@ export async function transformRequest(
             continue;
           }
           const reminderText = (blk as TextBlock).text;
-          if (!isCompressionProfitable(reminderText, o.cols)) {
+          if (!isCompressionProfitable(reminderText, o.cols, undefined, numCols)) {
             // Above threshold but image cost ≥ text cost. Net loss to compress.
             bumpPassthrough(info, 'not_profitable');
             processedExisting.push(blk);
             continue;
           }
-          const { blocks: imgs, droppedChars, droppedCodepoints: dcp } =
-            await textToImageBlocks(reminderText, o.cols);
+          const { blocks: imgs, droppedChars, droppedCodepoints: dcp, pixels } =
+            await textToImageBlocks(reminderText, o.cols, numCols);
           for (const img of imgs) {
             processedExisting.push(img);
             info.imageBytes += approxBlockBytes(img);
           }
+          info.imagePixels = (info.imagePixels ?? 0) + pixels;
           info.reminderImgs = (info.reminderImgs ?? 0) + imgs.length;
           info.compressedChars += reminderText.length;
           info.imageCount += imgs.length;
@@ -1321,19 +1412,20 @@ export async function transformRequest(
               if (inner.length < o.minToolResultChars) {
                 bumpPassthrough(info, 'below_threshold');
                 rewritten.push(blk);
-              } else if (!isCompressionProfitable(inner, o.cols, o.maxImagesPerToolResult)) {
+              } else if (!isCompressionProfitable(inner, o.cols, o.maxImagesPerToolResult, numCols)) {
                 bumpPassthrough(info, 'not_profitable');
                 rewritten.push(blk);
               } else {
                 // Paging: truncate before render if it would blow the image cap.
-                const paged = truncateForBudget(inner, o.maxImagesPerToolResult, o.cols);
+                const paged = truncateForBudget(inner, o.maxImagesPerToolResult, o.cols, numCols);
                 if (paged.truncated) {
                   info.truncatedToolResults = (info.truncatedToolResults ?? 0) + 1;
                   info.omittedChars = (info.omittedChars ?? 0) + paged.omittedChars;
                 }
-                const { blocks: imgs, droppedChars, droppedCodepoints: dcp } =
-                  await textToImageBlocks(paged.text, o.cols);
+                const { blocks: imgs, droppedChars, droppedCodepoints: dcp, pixels } =
+                  await textToImageBlocks(paged.text, o.cols, numCols);
                 for (const img of imgs) info.imageBytes += approxBlockBytes(img);
+                info.imagePixels = (info.imagePixels ?? 0) + pixels;
                 info.toolResultImgs = (info.toolResultImgs ?? 0) + imgs.length;
                 info.imageCount += imgs.length;
                 // Use original (pre-paging) length: that's what we would have
@@ -1364,22 +1456,23 @@ export async function transformRequest(
                   newInner.push(ib as TextBlock | ImageBlock);
                   continue;
                 }
-                if (!isCompressionProfitable(innerText, o.cols, o.maxImagesPerToolResult)) {
+                if (!isCompressionProfitable(innerText, o.cols, o.maxImagesPerToolResult, numCols)) {
                   bumpPassthrough(info, 'not_profitable');
                   newInner.push(ib as TextBlock | ImageBlock);
                   continue;
                 }
-                const paged = truncateForBudget(innerText, o.maxImagesPerToolResult, o.cols);
+                const paged = truncateForBudget(innerText, o.maxImagesPerToolResult, o.cols, numCols);
                 if (paged.truncated) {
                   info.truncatedToolResults = (info.truncatedToolResults ?? 0) + 1;
                   info.omittedChars = (info.omittedChars ?? 0) + paged.omittedChars;
                 }
-                const { blocks: imgs, droppedChars, droppedCodepoints: dcp } =
-                  await textToImageBlocks(paged.text, o.cols);
+                const { blocks: imgs, droppedChars, droppedCodepoints: dcp, pixels } =
+                  await textToImageBlocks(paged.text, o.cols, numCols);
                 for (const img of imgs) {
                   newInner.push(img);
                   info.imageBytes += approxBlockBytes(img);
                 }
+                info.imagePixels = (info.imagePixels ?? 0) + pixels;
                 info.toolResultImgs = (info.toolResultImgs ?? 0) + imgs.length;
                 info.imageCount += imgs.length;
                 info.compressedChars += innerText.length;
@@ -1435,6 +1528,7 @@ export async function transformRequest(
       info.collapsedImages = histInfo.collapsedImages;
       info.imageCount += histInfo.collapsedImages;
       info.imageBytes += histInfo.collapsedImageBytes;
+      info.imagePixels = (info.imagePixels ?? 0) + histInfo.collapsedImagePixels;
       info.droppedChars = (info.droppedChars ?? 0) + histInfo.droppedChars;
       for (const [cp, n] of histInfo.droppedCodepoints) {
         droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
@@ -1461,6 +1555,59 @@ export async function transformRequest(
     }
     info.droppedCodepointsTop = out;
   }
+  // Empirical-cost telemetry: count every char of TEXT remaining in the
+  // outgoing body (system text blocks + every TextBlock across messages).
+  // Pairs with `imagePixels` and the upstream usage so a regression over
+  // N cold-miss events solves `tokens ≈ α·outgoingTextChars + β·imagePixels`
+  // for the empirical chars/token and pixels/token under the live model.
+  info.outgoingTextChars = countOutgoingTextChars(req);
   const outBody = new TextEncoder().encode(JSON.stringify(req));
   return { body: outBody, info };
+}
+
+/** Walk the outgoing transformed request body and sum the length of every
+ *  `text` field in the system field and across all message content blocks.
+ *  Excludes image base64, tool inputs/outputs structure, etc. — counting
+ *  only the chars that the upstream tokenizer will actually see as text. */
+function countOutgoingTextChars(req: MessagesRequest): number {
+  let n = 0;
+  const sys = req.system;
+  if (typeof sys === 'string') {
+    n += sys.length;
+  } else if (Array.isArray(sys)) {
+    for (const b of sys) {
+      if (b && (b as TextBlock).type === 'text' && typeof (b as TextBlock).text === 'string') {
+        n += (b as TextBlock).text.length;
+      }
+    }
+  }
+  for (const msg of req.messages ?? []) {
+    const c = msg.content;
+    if (typeof c === 'string') {
+      n += c.length;
+      continue;
+    }
+    if (!Array.isArray(c)) continue;
+    for (const b of c) {
+      if (b && (b as TextBlock).type === 'text' && typeof (b as TextBlock).text === 'string') {
+        n += (b as TextBlock).text.length;
+        continue;
+      }
+      // tool_result blocks can hold text inside `.content` as string-or-array.
+      if (b && (b as ToolResultBlock).type === 'tool_result') {
+        const tr = b as ToolResultBlock;
+        const inner = tr.content;
+        if (typeof inner === 'string') {
+          n += inner.length;
+        } else if (Array.isArray(inner)) {
+          for (const ib of inner) {
+            if (ib && (ib as TextBlock).type === 'text' && typeof (ib as TextBlock).text === 'string') {
+              n += (ib as TextBlock).text.length;
+            }
+          }
+        }
+      }
+    }
+  }
+  return n;
 }

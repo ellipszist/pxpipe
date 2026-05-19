@@ -77,6 +77,11 @@ export interface HistoryCollapseInfo {
   collapsedImages: number;
   /** Total PNG bytes emitted. */
   collapsedImageBytes: number;
+  /** Total pixel area emitted (`Σ width × height`). Pairs with cold-miss
+   *  cache_create tokens for empirical px/token derivation — same role as
+   *  `info.imagePixels` in TransformInfo, accumulated here so the caller
+   *  can fold history images into the same regression. */
+  collapsedImagePixels: number;
   /** Why we didn't collapse — populated only when no collapse happened. */
   reason?:
     | 'no_history'
@@ -252,6 +257,7 @@ export async function collapseHistory(
     collapsedChars: 0,
     collapsedImages: 0,
     collapsedImageBytes: 0,
+    collapsedImagePixels: 0,
     droppedChars: 0,
     droppedCodepoints: new Map(),
   };
@@ -303,6 +309,7 @@ export async function collapseHistory(
       },
     });
     info.collapsedImageBytes += img.png.length;
+    info.collapsedImagePixels += img.width * img.height;
     info.droppedChars += img.droppedChars;
     for (const [cp, n] of img.droppedCodepoints) {
       info.droppedCodepoints.set(cp, (info.droppedCodepoints.get(cp) ?? 0) + n);

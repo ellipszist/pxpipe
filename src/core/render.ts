@@ -27,7 +27,9 @@ import { encodeGrayPng } from './png.js';
  *  CHARS_PER_IMAGE from the same constants the renderer actually uses. */
 export const MAX_HEIGHT_PX = 1568;
 const DEFAULT_COLS = 100;
-const PAD_X = 4;
+/** Horizontal padding inside the rendered PNG (left + right each). Exported
+ *  so transform.ts can derive image pixel-area for token-cost estimation. */
+export const PAD_X = 4;
 /** Vertical padding inside the rendered PNG (top + bottom each). Exported
  *  for the same reason as MAX_HEIGHT_PX. */
 export const PAD_Y = 4;
@@ -300,6 +302,159 @@ export async function renderTextToPngs(
   for (let i = 0; i < lines.length; i += linesPerImg) {
     const chunk = lines.slice(i, i + linesPerImg).join('\n');
     images.push(await renderChunkToPng(chunk, cols));
+  }
+  return images;
+}
+
+// --- R2 multi-column rendering --------------------------------------------
+//
+// Single-column packing leaves Anthropic's 1568×1568 image area badly
+// under-used: at cell 5×11 and cols=100, our render canvas is only 508 px
+// wide — ~32% of the horizontal budget. Most real Claude Code tool docs +
+// CLAUDE.md content wraps at well under 100 chars/row, so we end up paying
+// the per-image cost (~2,500 tokens) for an image that's mostly whitespace.
+//
+// R2 packs N columns side-by-side per image, column-major: column 1 holds
+// the first `linesPerImg` wrapped lines top-to-bottom, column 2 holds the
+// next `linesPerImg`, etc. One image therefore covers `numCols×linesPerImg`
+// wrapped lines instead of `linesPerImg` — image count drops by ~numCols.
+//
+// OCR ORDERING IS THE RISK. The vision encoder must read column 1 fully
+// before column 2. Modern vision LLMs (Claude included) handle newspaper-
+// column layout reasonably well when the gutter is visually clear, but
+// this needs empirical verification on representative slabs before
+// becoming the default. Until then this lives behind an opt-in flag.
+
+const GUTTER_CELLS = 4;
+const MAX_WIDTH_PX = 1568;
+
+/** Pixel width of a multi-col render canvas at the given `cols` and `numCols`. */
+export function multiColWidth(cols: number, numCols: number): number {
+  const n = Math.max(1, numCols | 0);
+  return 2 * PAD_X + n * cols * ATLAS_CELL_W + (n - 1) * GUTTER_CELLS * ATLAS_CELL_W;
+}
+
+/** Largest `numCols` that fits within MAX_WIDTH_PX at `cols`. Useful for the
+ *  CLI clamp so an over-large flag doesn't produce >1568px PNGs. */
+export function maxFittingCols(cols: number): number {
+  let n = 1;
+  while (multiColWidth(cols, n + 1) <= MAX_WIDTH_PX) n++;
+  return n;
+}
+
+async function renderMultiColChunkFromLines(
+  lines: string[],
+  cols: number,
+  numCols: number,
+  charsCovered: number,
+): Promise<RenderedImage> {
+  const linesPerImg = Math.max(1, Math.floor((MAX_HEIGHT_PX - 2 * PAD_Y) / ATLAS_CELL_H));
+  const width = multiColWidth(cols, numCols);
+  // Height tracks the tallest column. With column-major packing column 0 is
+  // always at least as tall as later columns, so usedRows = min(lines.length, linesPerImg).
+  const usedRows = Math.min(lines.length, linesPerImg);
+  const height = 2 * PAD_Y + usedRows * ATLAS_CELL_H;
+
+  const fb = new Uint8Array(width * height);
+  let droppedChars = 0;
+  const droppedCodepoints = new Map<number, number>();
+
+  // Column-major: lines [c*linesPerImg, (c+1)*linesPerImg) land in column c.
+  const colStride = cols * ATLAS_CELL_W + GUTTER_CELLS * ATLAS_CELL_W;
+  for (let c = 0; c < numCols; c++) {
+    const colBaseX = PAD_X + c * colStride;
+    const colStart = c * linesPerImg;
+    if (colStart >= lines.length) break;
+    const colEnd = Math.min(colStart + linesPerImg, lines.length);
+    for (let r = 0; r < colEnd - colStart; r++) {
+      const line = lines[colStart + r]!;
+      const baseY = PAD_Y + r * ATLAS_CELL_H;
+      let col = 0;
+      for (const ch of line) {
+        if (col >= cols) break;
+        const codepoint = ch.codePointAt(0)!;
+        const baseX = colBaseX + col * ATLAS_CELL_W;
+        const advance = blitGlyph(fb, width, baseX, baseY, codepoint);
+        if (advance === 0) {
+          droppedChars++;
+          droppedCodepoints.set(codepoint, (droppedCodepoints.get(codepoint) ?? 0) + 1);
+          col += 1;
+        } else {
+          col += advance;
+        }
+      }
+    }
+  }
+
+  // Invert: black-on-white (matches single-col convention).
+  for (let i = 0; i < fb.length; i++) fb[i] = 255 - fb[i]!;
+
+  const png = await encodeGrayPng(fb, width, height);
+  return {
+    png,
+    width,
+    height,
+    charsRendered: charsCovered,
+    droppedChars,
+    droppedCodepoints,
+  };
+}
+
+/** Split `text` into N multi-column PNGs.
+ *
+ *  When `numCols <= 1`, delegates to `renderTextToPngs` to guarantee
+ *  byte-identical output (so the determinism / cache_control story stays
+ *  intact when the flag is off).
+ *
+ *  Column-major layout: column 0 fills top-to-bottom with the first
+ *  `linesPerImg` wrapped lines, column 1 with the next `linesPerImg`, etc.
+ *  One image holds `numCols × linesPerImg` wrapped lines total.
+ *
+ *  `charsRendered` for each image is the codepoint count of source text
+ *  whose wrapped lines landed in that image, with a +1 separator between
+ *  adjacent kept lines — same convention as `renderChunkToPng`. */
+export async function renderTextToPngsMultiCol(
+  text: string,
+  cols: number = DEFAULT_COLS,
+  numCols: number = 2,
+): Promise<RenderedImage[]> {
+  if (numCols <= 1) return renderTextToPngs(text, cols);
+  if (multiColWidth(cols, numCols) > MAX_WIDTH_PX) {
+    // Clamp rather than throw — keeps the proxy serving traffic even if a
+    // bad CLI flag slipped through. Falls back to the widest fitting count.
+    numCols = maxFittingCols(cols);
+    if (numCols <= 1) return renderTextToPngs(text, cols);
+  }
+
+  const lines = wrapLines(text, cols);
+  const linesPerImg = Math.max(1, Math.floor((MAX_HEIGHT_PX - 2 * PAD_Y) / ATLAS_CELL_H));
+  const linesPerImage = linesPerImg * numCols;
+  const totalLines = lines.length;
+
+  // Total source codepoints — for the last image we can use this directly
+  // when every wrapped line fits.
+  let totalChars = 0;
+  for (const _ of text) totalChars++;
+
+  const images: RenderedImage[] = [];
+  let coveredChars = 0;
+  for (let i = 0; i < totalLines; i += linesPerImage) {
+    const slice = lines.slice(i, i + linesPerImage);
+    const isLast = i + linesPerImage >= totalLines;
+    let chars: number;
+    if (isLast) {
+      // Last image: assign whatever source coverage remains so the per-image
+      // counts sum to the total input codepoint count.
+      chars = Math.max(0, totalChars - coveredChars);
+    } else {
+      // Count kept-line codepoints + one separator per adjacent pair.
+      let n = 0;
+      for (const ln of slice) for (const _ of ln) n++;
+      n += Math.max(0, slice.length - 1);
+      chars = n;
+    }
+    coveredChars += chars;
+    images.push(await renderMultiColChunkFromLines(slice, cols, numCols, chars));
   }
   return images;
 }

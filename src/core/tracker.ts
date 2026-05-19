@@ -35,6 +35,15 @@ export interface TrackEvent {
   compressed_chars?: number;
   image_count?: number;
   image_bytes?: number;
+  /** Total pixel area summed across all rendered images. Pairs with
+   *  `cache_create_tokens` on cold-miss events for empirical px/token. */
+  image_pixels?: number;
+  /** Total TEXT chars remaining in the outgoing transformed body (every
+   *  `text` block across system + messages, including tool_result text that
+   *  didn't compress). Pairs with `image_pixels` so a regression over N
+   *  cold-misses solves both `chars_per_token` (α) and `pixels_per_token` (β)
+   *  for the live model. */
+  outgoing_text_chars?: number;
   static_chars?: number;
   dynamic_chars?: number;
   dynamic_block_count?: number;
@@ -169,6 +178,12 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     }
     if (info.imageCount !== undefined) out.image_count = info.imageCount;
     if (info.imageBytes !== undefined) out.image_bytes = info.imageBytes;
+    if (info.imagePixels !== undefined && info.imagePixels > 0) {
+      out.image_pixels = info.imagePixels;
+    }
+    if (info.outgoingTextChars !== undefined && info.outgoingTextChars > 0) {
+      out.outgoing_text_chars = info.outgoingTextChars;
+    }
     if (info.staticChars !== undefined) out.static_chars = info.staticChars;
     if (info.dynamicChars !== undefined) out.dynamic_chars = info.dynamicChars;
     if (info.dynamicBlockCount !== undefined) out.dynamic_block_count = info.dynamicBlockCount;

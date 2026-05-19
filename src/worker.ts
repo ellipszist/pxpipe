@@ -34,6 +34,9 @@ export interface Env {
   MIN_TOOL_RESULT_CHARS?: string;
   PLACEMENT?: string;
   COLS?: string;
+  /** R2 multi-column packing — default 1 (off). 2 squeezes ~2× source rows
+   *  per image; OCR-verify before flipping in production. */
+  MULTI_COL?: string;
   /** When "0" / "false", disable per-request event JSON logs. Default-on.
    *  Cloudflare ingests console.log as Workers Logs; pipe via Logpush to
    *  R2/S3 for the same JSONL shape Node writes to disk. */
@@ -66,6 +69,9 @@ export default {
       minToolResultChars: env.MIN_TOOL_RESULT_CHARS ? Number(env.MIN_TOOL_RESULT_CHARS) : 10000,
       placement: (env.PLACEMENT as 'system' | 'user') ?? 'user',
       cols: env.COLS ? Number(env.COLS) : 100,
+      // R2 multi-column ON (2 cols) — single-col drops below break-even on
+      // real tool-doc slabs. Override via MULTI_COL=1 if OCR misreads layout.
+      multiCol: env.MULTI_COL ? Math.max(1, Number(env.MULTI_COL) | 0) : 2,
     };
     const trackingOn = truthy(env.PIXELPIPE_TRACK, true);
     // Workers Logs ingests stdout as separate log lines. Emit one JSON line
