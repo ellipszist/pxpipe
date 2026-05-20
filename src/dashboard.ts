@@ -763,14 +763,14 @@ const DASHBOARD_HTML = `<!doctype html>
   </div>
   <div class="card"><div class="label">share of total bill saved</div>
     <div class="value pos" id="m_pct">0%</div>
-    <div class="small" id="m_pct_sub">total bill (input + output×5) · input-only: <span id="m_pct_total">0%</span></div>
+    <div class="small" id="m_pct_sub">÷ (input + 5×output) — output billed at 5× input rate · input-only: <span id="m_pct_total">0%</span></div>
     <details class="math"><summary>show calculation</summary>
       <div class="formula" id="m_pct_math"></div>
     </details>
   </div>
   <div class="card"><div class="label">token-equivalent total</div>
     <div class="value" id="m_tokeq">0</div>
-    <div class="small" id="m_tokeq_sub">weekly-meter consumption · input + output×5</div>
+    <div class="small" id="m_tokeq_sub">input + 5×output — output billed at 5× input rate</div>
     <details class="math"><summary>show calculation</summary>
       <div class="formula" id="m_tokeq_math"></div>
     </details>
@@ -912,7 +912,7 @@ async function tick() {
     // reports as a percentage.
     document.getElementById('m_tokeq').textContent = numFmt(s.actual_token_equivalent);
     document.getElementById('m_tokeq_sub').textContent =
-      \`baseline \${numFmt(s.baseline_token_equivalent)} · input + output×5\`;
+      \`baseline \${numFmt(s.baseline_token_equivalent)} · input + 5×output\`;
 
     // Populate "show calculation" blocks under each savings card.
     renderSavingsMath(s);
@@ -1014,17 +1014,27 @@ function renderSavingsMath(s) {
     + '<span class="src">source: ' + escapeHtml(pa.source || 'docs.anthropic.com pricing') + '</span>';
 
   // ---- reduction (%) card -------------------------------------------------
+  // The card headline is share_of_bill = saved / (baseline_input + output × 5).
+  // Output never compresses, so a heavy-output day shrinks the percentage even
+  // when input savings haven\\'t changed — that\\'s the framing the README\\'s
+  // 75-80% weekly-meter caveat is about.
   document.getElementById('m_pct_math').innerHTML =
     '<div><span class="k">formula:</span> <span class="v">'
-      + 'saved_pct = (baseline − actual) / baseline × 100</span></div>'
-    + '<div><span class="k">per event:</span> <span class="v">'
-      + 'baseline = cacheable·weight + cold_tail, weight matches actual cache class</span></div>'
+      + 'share_of_bill = saved / (baseline_input + output × ' + (pa.output_multiplier ?? 5)
+      + ') × 100</span></div>'
+    + '<div><span class="k">why include output:</span> <span class="v">'
+      + 'Anthropic\\'s weekly meter counts input + output × 5; the proxy only moves input</span></div>'
     + '<div style="height:6px"></div>'
-    + fmtRow('baseline', s.baseline_input_weighted, '(cache-aware counterfactual)')
-    + fmtRow('actual', s.actual_input_weighted, '(weighted upstream usage)')
-    + fmtRow('saved', s.saved_input_tokens, '<span class="op">=</span> baseline − actual')
-    + fmtRow('saved_pct', (s.saved_pct || 0).toFixed(1) + '%',
-             '<span class="op">=</span> saved / baseline × 100')
+    + fmtRow('saved', s.saved_input_tokens, '(input savings — proxy doesn\\'t touch output)')
+    + fmtRow('baseline_input', s.baseline_input_weighted, '(cache-aware counterfactual)')
+    + fmtRow('output × ' + (pa.output_multiplier ?? 5), s.output_weighted,
+             '(weighted output tokens)')
+    + fmtRow('baseline_total', s.baseline_input_weighted + s.output_weighted,
+             '<span class="op">=</span> baseline_input + output × 5')
+    + fmtRow('share_of_bill', (s.saved_pct_of_total_bill || 0).toFixed(1) + '%',
+             '<span class="op">=</span> saved / baseline_total × 100')
+    + fmtRow('input-only %', (s.saved_pct_input_only || 0).toFixed(1) + '%',
+             '(sub-line: saved / baseline_input × 100 — output excluded)')
     + '<span class="src">measured · no estimation</span>';
 
   // ---- token-equivalent total card ----------------------------------------
