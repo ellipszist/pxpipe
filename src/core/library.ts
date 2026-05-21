@@ -4,7 +4,7 @@ import { transformRequest, type TransformInfo, type TransformOptions } from './t
 
 export type BytesLike = Uint8Array | ArrayBuffer | ArrayBufferView;
 
-export interface PixelpipeOptions extends Pick<TransformOptions, 'charsPerToken'> {
+export interface PixelpipeOptions extends Pick<TransformOptions, 'charsPerToken' | 'historyAmortizationHorizon'> {
   /** Test/debug-only bypass. Product hosts should prefer their dashboard setting. */
   readonly compress?: boolean;
 }

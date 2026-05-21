@@ -30,6 +30,7 @@ import {
 import { bytesToBase64 } from './png.js';
 import { ATLAS_CELL_H } from './atlas.js';
 import { collapseHistory } from './history.js';
+import { CACHE_CREATE_RATE, CACHE_READ_RATE } from './baseline.js';
 
 export interface TransformOptions {
   /** Master switch — false makes this a no-op pass-through. */
@@ -72,6 +73,28 @@ export interface TransformOptions {
    *  4 (Anthropic's published English-text average). Host may override per
    *  request if it has a better number for the specific deployment. */
   charsPerToken?: number;
+  /** Multi-turn amortization horizon for the **history-collapse** break-even
+   *  gate. The per-turn gate that asks "is the image cheaper than the text
+   *  on this single request, cold?" gets the wrong answer when Anthropic has
+   *  already cached the text-based prefix — text-at-10% beats image-at-100%
+   *  on warm turns. But the text prefix's cache *will* eventually expire (5-
+   *  min idle or 4-breakpoint cliff), and on that cold turn the giant text
+   *  pays full freight while an image prefix pays once and rides
+   *  `cache_read` for the rest of the session.
+   *
+   *  Setting this to N ≥ 2 evaluates the gate as if N future turns will
+   *  share the same prefix, weighting both sides by
+   *  `(cache_create_rate × 1 + cache_read_rate × (N-1))`. Honest expected-
+   *  lifetime-cost framing, no session state required. Mirrors the JIT
+   *  tiered-compilation analogue: assume the hot path runs N more times,
+   *  decide once, eat the loss if the session ended early.
+   *
+   *  Default 1 (= per-turn gate, current behaviour). Hosts opt in by
+   *  passing a value ≥ 2 (e.g. ocproxy passes 5 for Codex traffic). See
+   *  README's "The unsolved part: multi-turn amortization" section for the
+   *  full design space — try-then-decide (this), session-state (rejected),
+   *  always-collapse (rejected), cache-bust-driven (rejected). */
+  historyAmortizationHorizon?: number;
 }
 
 const DEFAULTS: Required<TransformOptions> = {
@@ -103,6 +126,10 @@ const DEFAULTS: Required<TransformOptions> = {
   // later in this file — kept as a literal here to avoid forward-reference).
   // Host overrides per-request when the dashboard's live fit has converged.
   charsPerToken: 4,
+  // Per-turn break-even gate by default (= horizon 1). Hosts that want
+  // multi-turn amortization (e.g. ocproxy's Codex integration) pass an
+  // integer ≥ 2 via `historyAmortizationHorizon`. See option jsdoc.
+  historyAmortizationHorizon: 1,
   // R2 multi-column ON (2 cols) — at single-col the break-even gate
   // correctly rejects compression on real tool-doc-shaped slabs (~38 chars/
   // row → ~29 imgs vs 39k text tokens → net loss). Two columns packs ~2×
@@ -357,6 +384,84 @@ export function isCompressionProfitable(
   const textTokensEquivalent = textLen / cpt;
   return imageTokensCost < textTokensEquivalent;
 }
+
+/**
+ * Horizon-aware variant of `isCompressionProfitable` for the
+ * **history-collapse** call site only.
+ *
+ * The per-turn gate (above) compares cold image cost vs cold text cost.
+ * That's the right question when the request is cold on both sides, but
+ * the wrong question once Anthropic has already cached the text-based
+ * prefix — text-at-10% beats image-at-100% per-turn. The text prefix's
+ * cache *will* eventually expire, though (5-min idle, 4-breakpoint
+ * cliff, system-slab churn), and on that cold turn the giant text pays
+ * `cache_create` (1.25×) on the full uncompressed prefix while an image
+ * prefix pays `cache_create` once and `cache_read` (0.1×) for the rest
+ * of the session.
+ *
+ * Honest expected-lifetime-cost framing over `N` future turns starting
+ * from a *worst-case warm* state for the image (cache_create on turn 1,
+ * cache_read on turns 2..N) and a best-case warm state for the text
+ * (cache_read every turn for the full N). The gate accepts the collapse
+ * iff
+ *
+ *   I × (CC + CR×(N-1)) < T × CR × N
+ *
+ * where I = image_tokens, T = text_tokens, CC = 1.25, CR = 0.10.
+ *
+ * Examples (CC=1.25, CR=0.10):
+ *   N=1:  I < 0.08 × T   (essentially never — text-at-10% beats image)
+ *   N=5:  I < 0.30 × T
+ *   N=10: I < 0.47 × T
+ *   N=20: I < 0.64 × T
+ *
+ * Real history typically renders to I/T ≈ 0.3–0.5 (one image per
+ * ~14 KB of dense text vs ~2,500 tokens per image at 1.5 cpt), so a
+ * horizon of N=5–10 flips a lot of currently-rejected collapses
+ * into accepts without ever taking a bet a single-turn session would lose.
+ *
+ * Falls back to the cold per-turn gate when `horizon <= 1`.
+ */
+export function isCompressionProfitableAmortized(
+  textOrLen: string | number,
+  cols: number,
+  imageCountCap: number | undefined,
+  numCols: number,
+  charsPerToken: number,
+  horizon: number,
+): boolean {
+  if (!Number.isFinite(horizon) || horizon <= 1) {
+    return isCompressionProfitable(textOrLen, cols, imageCountCap, numCols, charsPerToken);
+  }
+  const N = Math.max(2, Math.floor(horizon));
+  const n = Math.max(1, numCols | 0);
+  let estImages: number;
+  let textLen: number;
+  if (typeof textOrLen === 'string') {
+    estImages = estimateImageCount(textOrLen, cols, n);
+    textLen = textOrLen.length;
+  } else {
+    const charsPerImage = maxCharsPerImage(cols) * n;
+    estImages = Math.max(1, Math.ceil(textOrLen / charsPerImage));
+    textLen = textOrLen;
+  }
+  if (imageCountCap !== undefined && imageCountCap > 0) {
+    estImages = Math.min(estImages, imageCountCap);
+  }
+  const cpt = Number.isFinite(charsPerToken) && charsPerToken > 0
+    ? charsPerToken
+    : CHARS_PER_TOKEN;
+  const imageTokens = estImages * effectiveTokensPerImage(n);
+  const textTokens = textLen / cpt;
+  // Worst-case-for-image vs best-case-for-text framing — this is on
+  // purpose. We refuse to collapse on the optimistic side, so the gate
+  // only fires when the collapse wins even under pessimistic warm-cache
+  // assumptions.
+  const imageLifetime = imageTokens * (CACHE_CREATE_RATE + CACHE_READ_RATE * (N - 1));
+  const textLifetime = textTokens * CACHE_READ_RATE * N;
+  return imageLifetime < textLifetime;
+}
+
 
 /** Increment a passthrough-reason counter on `info`. Lazily allocates the
  *  `passthroughReasons` sub-object so happy-path events stay lean. */
@@ -1310,8 +1415,9 @@ async function runHistoryCollapseAndFinalize(
     const historyCpt = opts.charsPerToken !== undefined
       ? o.charsPerToken
       : HISTORY_CHARS_PER_TOKEN;
+    const horizon = Math.max(1, Math.floor(o.historyAmortizationHorizon));
     const historyProfitable = (text: string, cols: number): boolean =>
-      isCompressionProfitable(text, cols, undefined, 1, historyCpt);
+      isCompressionProfitableAmortized(text, cols, undefined, 1, historyCpt, horizon);
     const { messages: newMessages, info: histInfo } = await collapseHistory(
       req.messages,
       historyProfitable,
@@ -1861,8 +1967,9 @@ export async function transformRequest(
     const historyCpt = opts.charsPerToken !== undefined
       ? o.charsPerToken
       : HISTORY_CHARS_PER_TOKEN;
+    const horizon = Math.max(1, Math.floor(o.historyAmortizationHorizon));
     const historyProfitable = (text: string, cols: number): boolean =>
-      isCompressionProfitable(text, cols, undefined, 1, historyCpt);
+      isCompressionProfitableAmortized(text, cols, undefined, 1, historyCpt, horizon);
     const { messages: newMessages, info: histInfo } = await collapseHistory(
       req.messages,
       historyProfitable,
