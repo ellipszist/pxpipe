@@ -19,7 +19,7 @@ the needle in the noise. `setup.sh` floods ≈200k tokens of inert logs around a
 ```bash
 # Terminal 1 — set up: generates the context, builds, starts BOTH proxies, seeds
 #              two read-only copies, and PRINTS the ground-truth answer.
-bash demo/effective-context/setup.sh
+bash demo/effective-context/setup.sh   # Fable only (Opus off); 'setup.sh opus' to enable Opus
 
 # Terminal 2 — LEFT  = normal   (interactive Claude — may drown and answer wrong)
 bash demo/effective-context/a.sh   # defaults to Fable; `a.sh opus` to use Opus
@@ -34,11 +34,12 @@ copies inside a subshell, so your terminal stays in the repo afterward. `claude`
 usually a shell alias; the scripts resolve the real binary, or set
 `CLAUDE_BIN=/path/to/claude`. To redo, re-run `setup.sh`.
 
-**Model:** both scripts default to **Fable 5**. Pass a model as the first arg to
-override — `bash demo/effective-context/a.sh opus` (also `sonnet`, `haiku`, or a
-full `claude-…` id); run both columns on the same model. For `b.sh`, pxpipe only
-compresses models the `:47824` proxy allows (Fable-only by default — see
-`PXPIPE_MODELS` or the dashboard "compress models" chips).
+**Model:** everything defaults to **Fable 5** — Opus is off by default, matching
+production. To run on another model, pass it to **all three**: `setup.sh opus`
+(adds Opus to the `:47824` proxy's compress scope), then `a.sh opus` / `b.sh opus`
+(also `sonnet`, `haiku`, or a full `claude-…` id), same model on both columns.
+`setup.sh` is what enables compression for that model; you can also toggle it live
+on the dashboard "compress models" chips.
 
 ## See the result — compare the two integers
 

@@ -18,7 +18,7 @@ doubles as a recall test. `node --test` is built in (no install).
 
 ```bash
 # Terminal 1 — set up: kills old proxies, builds, starts BOTH proxies, seeds copies
-bash demo/cost-ab/setup.sh
+bash demo/cost-ab/setup.sh        # Fable only (Opus off); 'setup.sh opus' to enable Opus
 
 # Terminal 2 — LEFT  = normal   (interactive Claude — you watch the CLI)
 bash demo/cost-ab/a.sh            # defaults to Fable; `a.sh opus` to use Opus
@@ -33,11 +33,12 @@ sessions (uses plan usage). `claude` is usually a shell alias; the scripts resol
 the real binary, or set `CLAUDE_BIN=/path/to/claude`. To redo a run, re-run
 `setup.sh` (it resets the working copies + fresh logs), then `a.sh` / `b.sh`.
 
-**Model:** both scripts default to **Fable 5**. Pass a model as the first arg to
-override — `bash demo/cost-ab/a.sh opus` (also `sonnet`, `haiku`, or a full
-`claude-…` id). Run **both** columns on the same model for a fair A/B. For `b.sh`,
-pxpipe only compresses models the `:47824` proxy allows (Fable-only by default —
-see `PXPIPE_MODELS` or the dashboard "compress models" chips).
+**Model:** everything defaults to **Fable 5** — Opus is off by default, matching
+production. To run the A/B on another model, pass it to **all three** scripts:
+`setup.sh opus` (adds Opus to the `:47824` proxy's compress scope), then
+`a.sh opus` / `b.sh opus` (also `sonnet`, `haiku`, or a full `claude-…` id) —
+same model on both columns for a fair A/B. `setup.sh` is what enables compression
+for that model; you can also toggle it live on the dashboard "compress models" chips.
 
 ## See the result — just open the dashboard
 

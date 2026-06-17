@@ -11,7 +11,20 @@ PORT_ON=47824          # pxpipe      -> b.sh (right)
 PORT_OFF=47823         # passthrough -> a.sh (left, plain but logged)
 LOG_ON="$HOME/.pxpipe/ec-on.jsonl"
 LOG_OFF="$HOME/.pxpipe/ec-off.jsonl"
-MODELS="claude-fable-5,claude-opus-4-8"
+# Model under test: defaults to Fable 5 — the production default, where Opus is
+# OFF. Pass a model as the first arg to ADD it to the proxy's compress scope:
+#   bash setup.sh           -> Fable only (Opus off, matches production)
+#   bash setup.sh opus      -> Fable + Opus 4.8   (then: a.sh opus / b.sh opus)
+#   bash setup.sh sonnet|haiku|claude-...  -> Fable + that model
+case "${1:-fable}" in
+  fable)  MODEL=claude-fable-5 ;;
+  opus)   MODEL=claude-opus-4-8 ;;
+  sonnet) MODEL=claude-sonnet-4-6 ;;
+  haiku)  MODEL=claude-haiku-4-5 ;;
+  *)      MODEL="$1" ;;
+esac
+# Compress scope = Fable (production default) + the chosen model (Fable-only by default).
+MODELS="claude-fable-5"; [ "$MODEL" = "claude-fable-5" ] || MODELS="claude-fable-5,$MODEL"
 EC="demo/effective-context"
 
 kill_port() { local p; p=$(lsof -ti tcp:"$1" 2>/dev/null || true); [ -n "$p" ] && kill "$p" 2>/dev/null || true; }
@@ -40,6 +53,7 @@ cp -R "$EC/context" /tmp/pp-ec-right/context
 cat <<EOF
 
 Ready. Proxies up: pxpipe :$PORT_ON  ·  passthrough :$PORT_OFF
+Compress scope: $MODELS  (Opus is OFF by default — 'setup.sh opus' to include it; pass the SAME model to a.sh/b.sh)
 GROUND-TRUTH ANSWER: ${ANSWER:-see /tmp/ec-gen.log}   <- both columns should reply with exactly this
 
 In a browser, open the live dashboard (context/token reduction, updates as it reads):
