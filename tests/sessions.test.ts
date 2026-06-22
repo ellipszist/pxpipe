@@ -131,10 +131,13 @@ describe('aggregateSessions', () => {
 
   it('credits the real prefix compression (image prefix fewer tokens than text prefix)', async () => {
     writeEvents(tmp, [
-      // First turn of the session => COLD: text would re-create the whole
-      //   cacheable prefix at 1.25x, not read it. 18000*1.25 + 2000 cold tail
-      //   = 22500 + 2000 = 24500. actual = 1000 + 800*1.25 + 100*0.1 = 2010.
-      //   saved = 24500 - 2010 = 22490.
+      // First TRACKED turn, but cr=100 > 0 ⇒ the cache was OBSERVABLY warm (pxpipe
+      //   started mid-session / the prefix was warmed before this process booted).
+      //   Honest math prices the text counterfactual WARM too — not cold. With no
+      //   fresh in-memory prior we assume the cacheable prefix was fully reused:
+      //   baseline_eff = 18000*0.1 (reused) + 2000 cold tail = 3800.
+      //   actual = 1000 + 800*1.25 + 100*0.1 = 2010. saved = 3800 - 2010 = 1790.
+      //   (Pre-fix, a missing prior forced this cr>0 turn cold → fabricated 22490.)
       ev({
         first_user_sha8: 'aaaaaaaa',
         compressed: true,
@@ -174,9 +177,9 @@ describe('aggregateSessions', () => {
     ]);
     const { sessions } = await aggregateSessions(tmp);
     const s = sessions.get('aaaaaaaa')!;
-    // 22490 (cold) + 95 (warm) + 0 (probe miss) = 22585
-    expect(s.tokensSavedEst).toBe(22_585);
-    expect(s.charsSaved).toBe(22_585 * 4);
+    // 1790 (warm, no prior) + 95 (warm) + 0 (probe miss) = 1885
+    expect(s.tokensSavedEst).toBe(1_885);
+    expect(s.charsSaved).toBe(1_885 * 4);
     expect(s.requestCount).toBe(4);
   });
 

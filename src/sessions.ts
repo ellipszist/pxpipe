@@ -198,7 +198,16 @@ export async function aggregateSessions(
       const prev = warmth.get(id);
       // cr-grounded warmth: only price text warm if a warm cache was actually
       // observed (cr > 0). A miss within the TTL window was cold for both paths.
-      const warm = cr > 0 && prev !== undefined && tsSec - prev.ts < CACHE_TTL_SEC;
+      // cr-grounded warmth follows the OBSERVED read ALONE, not our in-memory map
+      // (a restart/eviction wipes it, and it can't see a session that was warm
+      // before this process booted). Mirrors dashboard.ts: pricing a cr>0 turn cold
+      // because the prior is missing would bill text the 1.25× create on a prefix we
+      // KNOW was cached — fabricating the inflated "saved" row. The map only refines
+      // the reused-vs-grown split; with no fresh prior, assume the cached prefix was
+      // fully reused (prevCacheable = cacheable → no fabricated growth).
+      const warm = cr > 0;
+      const warmFresh = prev !== undefined && tsSec - prev.ts < CACHE_TTL_SEC;
+      const prevCacheable = warm ? (warmFresh ? prev!.cacheable : cacheable) : 0;
       const baselineEff = computeBaselineInputEff(
         baseline,
         cacheable,
@@ -206,7 +215,7 @@ export async function aggregateSessions(
         cc,
         cr,
         warm,
-        warm ? prev!.cacheable : 0,
+        prevCacheable,
       );
       const actualEff = computeActualInputEff(inp, cc, cr);
       const tokensSaved = baselineEff - actualEff;

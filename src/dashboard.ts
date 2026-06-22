@@ -901,8 +901,8 @@ export class DashboardState {
         /* skip malformed line */
       }
     }
-    // Warmth-free baseline (see core/baseline.ts): no per-session state, so this
-    // replay produces byte-identical per-row numbers to the live update() path.
+    // Replay mirrors the live update() warmth logic (per-session baselineWarmth,
+    // cr-grounded) so it produces byte-identical per-row numbers to update().
     for (const t of tail) {
       const inp = t.input_tokens ?? 0;
       const out = t.output_tokens ?? 0;
