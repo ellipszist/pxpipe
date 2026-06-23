@@ -24,9 +24,11 @@ import { bytesToBase64 } from './png.js';
  * emitter (here) and the matcher (transform.ts) must reference this constant.
  */
 export const HISTORY_SYNTHETIC_INTRO =
-  '[Earlier turns of THIS conversation, transcribed in the image(s) below. Each turn is wrapped in <user t="N">...</user> or <assistant t="N">...</assistant> tags, where N is an absolute turn index (larger N = more recent); attribute every turn strictly by its tag, and treat the highest-N turns as the most recent prior context, NOT the low-N opening turns. This is prior context, NOT the current request.]';
+  '[Earlier turns of THIS conversation, transcribed in the image(s) below. Each turn is wrapped in <user t="N">...</user> or <assistant t="N">...</assistant> tags, where N is an absolute turn index (larger N = more recent); attribute every turn strictly by its tag, and treat the highest-N turns as the most recent prior context, NOT the low-N opening turns. Earlier turns may contain questions or tasks that were already answered later in this same history; do not reopen low-N turns unless the live text after this block asks you to. This is prior context, NOT the current request.]';
 export const HISTORY_SYNTHETIC_OUTRO =
   '[End of earlier conversation. The current request is the live text that follows below.]';
+
+const LATEST_COLLAPSED_USER_PREVIEW_CHARS = 300;
 
 /** Break-even gate predicate. Injected by transform.ts to avoid a circular import.
  *  IMPORTANT: pass the full string, not text.length — the row-aware path in
@@ -271,6 +273,42 @@ export function messagesToHistorySegments(
   return { text: textOut.join('\n\n'), slotText: slotOut.join('\n\n') };
 }
 
+function userPromptText(content: string | ContentBlock[]): string {
+  if (typeof content === 'string') return content;
+  const parts: string[] = [];
+  for (const blk of content) {
+    if (!blk || typeof blk !== 'object') continue;
+    const t = (blk as { type?: string }).type;
+    if (t === 'text') parts.push((blk as TextBlock).text);
+    else if (t === 'image') parts.push('[image]');
+  }
+  return parts.join('\n\n');
+}
+
+function compactPreview(text: string): string {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  if (compact.length <= LATEST_COLLAPSED_USER_PREVIEW_CHARS) return compact;
+  return compact.slice(0, LATEST_COLLAPSED_USER_PREVIEW_CHARS).trimEnd() + '...';
+}
+
+function latestCollapsedUserPointer(
+  messages: Message[],
+  upToExclusive: number,
+  fromInclusive: number,
+): TextBlock | undefined {
+  for (let i = upToExclusive - 1; i >= fromInclusive; i--) {
+    const m = messages[i]!;
+    if (m.role !== 'user') continue;
+    const preview = compactPreview(userPromptText(m.content));
+    if (!preview) continue;
+    return {
+      type: 'text',
+      text: `[Most recent collapsed user turn: <user t="${i}">${preview}</user>. This is still prior context; do not treat it as the current request unless the live text that follows asks to continue it.]`,
+    };
+  }
+  return undefined;
+}
+
 /**
  * Collapse the closed-prefix run into one synthetic user message with 1+ history images.
  * Returns original messages unchanged on any no-collapse path (reason set in info).
@@ -440,9 +478,11 @@ export async function collapseHistory(
     info.reason = 'render_empty';
     return { messages, info };
   }
+  const latestUserPointer = latestCollapsedUserPointer(messages, collapseLen, protectedPrefix);
   const syntheticContent: ContentBlock[] = [
     { type: 'text', text: HISTORY_SYNTHETIC_INTRO },
     ...imageBlocks,
+    ...(latestUserPointer ? [latestUserPointer] : []),
     { type: 'text', text: HISTORY_SYNTHETIC_OUTRO },
   ];
   const syntheticUser: Message = {

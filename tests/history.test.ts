@@ -10,7 +10,7 @@
  *     images.
  *   - `messagesToHistoryText`: `--- role ---` framing, skips empty turns.
  *   - `collapseHistory`: full pipeline — opts handling, break-even gate,
- *     synthetic user message shape (text+image+text), live-tail preservation.
+ *     synthetic user message shape (text+image+recency pointer+text), live-tail preservation.
  *   - `transformRequest` end-to-end: compressHistory off (default), on with
  *     enough turns to fire, off when no closed prefix exists.
  */
@@ -315,7 +315,37 @@ describe('collapseHistory', () => {
     expect(out[2]).toBe(msgs[11]);
   });
 
-  it('splits dense collapsed history into readable image pages without plaintext side channels', async () => {
+  it('adds live-text recency guardrails for collapsed history', async () => {
+    const oldMarker = 'OLD WORKTREE QUESTION';
+    const latestMarker = 'CURRENT FRONTIER IR REUSE';
+    const msgs: Message[] = [];
+    for (let i = 0; i < 14; i++) {
+      const marker = i === 0 ? oldMarker : i === 10 ? latestMarker : `turn ${i}`;
+      const body = `${marker}: ` + 'x'.repeat(2800);
+      msgs.push(i % 2 === 0 ? usr(body) : asst(body));
+    }
+
+    const { messages: out, info } = await collapseHistory(msgs, profitable, {
+      keepTail: 2,
+      minCollapsePrefix: 5,
+      cols: 100,
+      collapseChunk: 0,
+    });
+
+    expect(info.reason).toBe(undefined);
+    expect(info.collapsedTurns).toBe(12);
+    const content = out[0]!.content as Array<Record<string, unknown>>;
+    const textBlocks = content.filter((c) => c.type === 'text') as Array<{ text: string }>;
+    expect(textBlocks).toHaveLength(3);
+    expect(textBlocks[0]!.text).toContain('do not reopen low-N turns');
+    expect(textBlocks[1]!.text).toContain('Most recent collapsed user turn');
+    expect(textBlocks[1]!.text).toContain('<user t="10">');
+    expect(textBlocks[1]!.text).toContain(latestMarker);
+    expect(textBlocks[1]!.text).not.toContain(oldMarker);
+    expect(textBlocks[2]!.text).toContain('current request is the live text');
+  });
+
+  it('splits dense collapsed history into readable image pages with only a bounded recency pointer', async () => {
     const body = Array.from(
       { length: 180 },
       (_, i) => `line ${i}: ${'x'.repeat(80)}`,
@@ -334,9 +364,11 @@ describe('collapseHistory', () => {
     );
     const content = out[0]!.content as Array<Record<string, unknown>>;
     const textBlocks = content.filter((c) => c.type === 'text');
-    expect(textBlocks).toHaveLength(2);
+    expect(textBlocks).toHaveLength(3);
     expect((textBlocks[0] as { text: string }).text).toContain('attribute every turn strictly by its tag');
-    expect((textBlocks[1] as { text: string }).text).toContain('current request is the live text');
+    expect((textBlocks[1] as { text: string }).text).toContain('Most recent collapsed user turn');
+    expect(((textBlocks[1] as { text: string }).text).length).toBeLessThan(500);
+    expect((textBlocks[2] as { text: string }).text).toContain('current request is the live text');
     expect(content.filter((c) => c.type === 'image')).toHaveLength(info.collapsedImages);
   });
 
