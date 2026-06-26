@@ -268,6 +268,32 @@ describe('e2e cache alignment — Anthropic /v1/messages through the real proxy'
     expect(countCacheControlMarkers(new TextEncoder().encode(cap1.main[0]!.body))).toBe(0);
   });
 
+  it('CARRY-OVER (#11): the marked history image is a frozen page, not the partial tail, across an advance', async () => {
+    // Slab present (so the anchor relocates onto a history image) + enough history
+    // to collapse AND advance the window. The marker must land on a byte-FROZEN page
+    // (the carry-over anchor), never the last partial page — else the cached prefix
+    // busts on every advance (#11). Before the fix the marker sat on the LAST image.
+    const cap1 = await driveAnthropic(anthropicBody({ slabChars: 80_000, turns: turns(80, 4000) }));
+    cap1.restore();
+    const cap2 = await driveAnthropic(anthropicBody({ slabChars: 80_000, turns: turns(200, 4000) }));
+    cap2.restore();
+
+    const imgs1 = anthropicImages(cap1.main[0]!.body);
+    const imgs2 = anthropicImages(cap2.main[0]!.body);
+    const markedIdx1 = imgs1.findIndex((i) => i.marked);
+
+    // Conserved: exactly one marker, and it sits on an image.
+    expect(imgs1.filter((i) => i.marked)).toHaveLength(1);
+    expect(markedIdx1).toBeGreaterThanOrEqual(0);
+    // The advance is real (the window grew), so the byte-frozen check isn't vacuous.
+    expect(imgs2.length).toBeGreaterThan(imgs1.length);
+    // (1) NOT the last (partial, still-growing) page — that placement is the #11 bust.
+    expect(markedIdx1).toBeLessThan(imgs1.length - 1);
+    // (2) The marked page is byte-frozen: it reappears identically after the advance,
+    //     so Anthropic cache_reads the prefix instead of re-creating it.
+    expect(imgs2.some((i) => i.data === imgs1[markedIdx1]!.data)).toBe(true);
+  });
+
   it('relocates the single marker onto the HISTORY image once history collapses', async () => {
     // The trickiest cache move (relocateAnchorToHistoryImage), end-to-end: with a
     // tiny tail the caller marker stays on the SLAB image; once history collapses

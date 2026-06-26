@@ -874,3 +874,100 @@ describe('isCompressionProfitableAmortized — multi-turn horizon gate', () => {
     expect(cold(text, 100, undefined, 1, 1.5, NaN)).toBe(cold(text, 100, undefined, 1, 1.5, 0));
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression (task #14): the session's OPENING user turn must never resurface
+// as the LIVE request after collapse.
+//
+// transform.ts sets protectedPrefix = firstUserIdx + 1 so the opening turn —
+// which carries BOTH the slab image AND the user's first request text in one
+// message — is protected from collapsing into [image] placeholders (we keep the
+// slab as the byte-stable cache anchor). The trap: protecting it used to pass
+// the opening REQUEST TEXT through as clean native text at the very TOP, ahead
+// of the synthetic history image, where the model reads it as the live request
+// and re-actions a long-superseded ask ("add a Sonnet button" — already shipped).
+// The live request is ALWAYS the last user turn (tail = slice(collapseLen),
+// keepTail >= 1). Guard: slab survives byte-identical, opening text is demoted
+// to a PRIOR-CONTEXT tombstone, live tail preserved verbatim.
+// ---------------------------------------------------------------------------
+describe('collapseHistory — opening-turn request quarantine (regression #14)', () => {
+  const SLAB_DATA = 'U0xBQg=='; // base64("SLAB") — the recognition / cache anchor
+  const OPENING_REQUEST = 'can you update the ux to add a sonnet button';
+  const LIVE_REQUEST = 'LIVE: enforce live=last-user invariant and fail closed';
+
+  it('demotes the opening request to a tombstone, keeps the slab image, preserves the live tail', async () => {
+    const msgs: Message[] = [
+      // turn 0 — opening turn: request text + slab image in ONE message.
+      usr([
+        { type: 'text', text: OPENING_REQUEST },
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: SLAB_DATA } },
+      ]),
+    ];
+    // filler turns 1..12 — comfortably past break-even at cols=100.
+    for (let i = 1; i <= 12; i++) {
+      const body = `turn ${i}: ` + 'x'.repeat(2800);
+      msgs.push(i % 2 === 1 ? asst(body) : usr(body));
+    }
+    // final user turn — the actual live request.
+    msgs.push(usr(LIVE_REQUEST));
+
+    const { messages: out, info } = await collapseHistory(msgs, isCompressionProfitable, {
+      keepTail: 1,
+      minCollapsePrefix: 5,
+      cols: 100,
+      collapseChunk: 0,
+      protectedPrefix: 1, // protect the opening (slab) turn — transform.ts uses firstUserIdx + 1
+    });
+
+    // Collapse fired: [demoted head, synthetic history, live tail].
+    expect(info.reason).toBe(undefined);
+    expect(info.collapsedTurns).toBe(12);
+    expect(info.collapsedImages).toBeGreaterThanOrEqual(1);
+    expect(out.length).toBe(3);
+
+    // (1) Opening request TEXT is quarantined behind the PRIOR-CONTEXT tombstone —
+    //     never a clean native text block that could read as the live request.
+    const head = out[0]!;
+    expect(head.role).toBe('user');
+    const headContent = head.content as Array<Record<string, unknown>>;
+    const headText = headContent.filter((c) => c.type === 'text') as Array<{ text: string }>;
+    expect(headText).toHaveLength(1);
+    expect(headText[0]!.text).toContain('PRIOR CONTEXT ONLY');
+    expect(headText[0]!.text).toContain('must not be acted');
+    expect(headText[0]!.text).toContain('<user t="0">');
+    expect(headText[0]!.text).toContain('Preview:'); // the ask survives only as a marked preview
+    // The bare request string never appears as a standalone clean text block anywhere.
+    const cleanOpeningSomewhere = out.some(
+      (m) =>
+        Array.isArray(m.content) &&
+        (m.content as Array<Record<string, unknown>>).some(
+          (b) => b.type === 'text' && b.text === OPENING_REQUEST,
+        ),
+    );
+    expect(cleanOpeningSomewhere).toBe(false);
+
+    // (2) The slab image survives byte-identical (data unchanged) in the head.
+    const headImgs = headContent.filter((c) => c.type === 'image');
+    expect(headImgs).toHaveLength(1);
+    expect(headImgs[0]).toMatchObject({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: SLAB_DATA },
+    });
+
+    // (3) The live request is the LAST message, byte-identical to the input ref.
+    const live = out[out.length - 1]!;
+    expect(live).toBe(msgs[msgs.length - 1]);
+    expect(live.content).toBe(LIVE_REQUEST);
+
+    // (4) Synthetic history sits BETWEEN head and live; its recency pointer/outro
+    //     points at the live text and never resurrects the opening request.
+    const synth = out[1]!;
+    const synthText = (synth.content as Array<Record<string, unknown>>).filter(
+      (c) => c.type === 'text',
+    ) as Array<{ text: string }>;
+    expect(synthText.some((t) => t.text.includes('current request is the live text'))).toBe(true);
+    for (const t of synthText) {
+      expect(t.text).not.toContain(OPENING_REQUEST);
+    }
+  });
+});

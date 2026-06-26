@@ -102,6 +102,11 @@ export interface HistoryCollapseInfo {
   /** Per-image pixel dims, parallel to collapsedPngs. The dashboard ring reads
    *  info.imageDims in lockstep with info.imagePngs, so these must be pushed together. */
   collapsedImageDims: { width: number; height: number }[];
+  /** Ordinal (0-based, into the emitted history images) of the last byte-stable
+   *  history image — the carry-over cache anchor. The relocator pins the cache
+   *  breakpoint here so it survives window advances (#11). Undefined when history is
+   *  too short to have a fully grid-aligned chunk before collapseLen. */
+  carryOverImageOrdinal?: number;
   /** Why we didn't collapse — populated only when no collapse happened. */
   reason?:
     | 'no_history'
@@ -292,6 +297,75 @@ function compactPreview(text: string): string {
   return compact.slice(0, LATEST_COLLAPSED_USER_PREVIEW_CHARS).trimEnd() + '...';
 }
 
+/**
+ * Demote request TEXT in the protected head (slab anchor) to a marked PRIOR-CONTEXT
+ * tombstone. The session's OPENING user turn rides in the SAME message as the slab
+ * images (transform.ts sets protectedPrefix = firstUserIdx + 1 to keep that message
+ * from collapsing into [image] placeholders). Protecting it for the cache anchor also
+ * passed its request text through as clean native text at the very TOP — ahead of the
+ * synthetic history block — where the model reads it as the LIVE request. It never is:
+ * the live request is always in the tail (tail = messages.slice(collapseLen),
+ * keepTail >= 1), so any text in the protected head is, by construction, stale.
+ *
+ * Image/tool blocks (the slab) pass through byte-identical so the cache anchor and any
+ * cache_control breakpoint survive; the demotion is a pure function of the message, so
+ * the protected prefix stays byte-stable across turns (one-time re-cache on deploy).
+ */
+function demoteProtectedHeadText(head: Message[]): Message[] {
+  return head.map((m, idx) => {
+    if (m.role !== 'user') return m;
+    const tomb = (preview: string, cc?: CacheControl): TextBlock => {
+      const t: TextBlock = {
+        type: 'text',
+        text:
+          `[Opening turn <user t="${idx}"> of this session — PRIOR CONTEXT ONLY, ` +
+          `superseded by later turns; NOT the current request and must not be acted ` +
+          `on. Preview: "${preview}"]`,
+      };
+      if (cc !== undefined) {
+        (t as TextBlock & { cache_control?: CacheControl }).cache_control = cc;
+      }
+      return t;
+    };
+    if (typeof m.content === 'string') {
+      const preview = compactPreview(m.content);
+      return preview ? { ...m, content: [tomb(preview)] } : m;
+    }
+    if (!Array.isArray(m.content)) return m;
+    // pxpipe's own slab scaffolding (the rendered images, the fact-sheet, and the
+    // '[End of rendered context.]' boundary) is NOT the user's request and must
+    // survive byte-identical: relocateAnchorToHistoryImage keys on that boundary
+    // text to locate the slab cache anchor. Only the user's stale opening turn —
+    // the blocks AFTER the boundary — gets demoted. With no boundary (the slab did
+    // not image) boundaryIdx is -1 and the whole message demotes, exactly as before.
+    const boundaryIdx = m.content.findIndex(
+      (b) =>
+        b && typeof b === 'object' &&
+        (b as { type?: string }).type === 'text' &&
+        (b as TextBlock).text === '[End of rendered context.]',
+    );
+    let changed = false;
+    const out: ContentBlock[] = [];
+    for (let i = 0; i < m.content.length; i++) {
+      const blk = m.content[i]!;
+      if (boundaryIdx >= 0 && i <= boundaryIdx) {
+        out.push(blk); // slab images + fact-sheet + boundary: proxy scaffolding, kept verbatim
+        continue;
+      }
+      if (blk && typeof blk === 'object' && (blk as { type?: string }).type === 'text') {
+        const preview = compactPreview((blk as TextBlock).text);
+        if (preview) {
+          out.push(tomb(preview, (blk as { cache_control?: CacheControl }).cache_control));
+          changed = true;
+          continue;
+        }
+      }
+      out.push(blk); // images / tool blocks (slab anchor) pass through byte-identical
+    }
+    return changed ? { ...m, content: out } : m;
+  });
+}
+
 function latestCollapsedUserPointer(
   messages: Message[],
   upToExclusive: number,
@@ -410,6 +484,13 @@ export async function collapseHistory(
   ends.add(collapseLen);
   const sortedEnds = [...ends].filter((e) => e > protectedPrefix && e <= collapseLen).sort((a, b) => a - b);
 
+  // Carry-over anchor end: the largest FULLY grid-aligned chunk boundary strictly
+  // before collapseLen. That chunk's bytes are frozen across window advances, unlike
+  // the newest partial chunk — so it's the stable place to pin the cache breakpoint (#11).
+  let carryOverEnd = -1;
+  for (let e = protectedPrefix + step; e < collapseLen; e += step) carryOverEnd = e;
+  let carryOverOrdinal = -1;
+
   const imageBlocks: Array<ImageBlock & { cache_control?: CacheControl }> = [];
   let chunkStart = protectedPrefix;
   for (const chunkEnd of sortedEnds) {
@@ -474,6 +555,10 @@ export async function collapseHistory(
         info.droppedCodepoints.set(cp, (info.droppedCodepoints.get(cp) ?? 0) + n);
       }
     }
+    // The carry-over chunk's LAST image is the newest byte-stable history image.
+    // Record its ordinal so the relocator pins the cache breakpoint here instead of
+    // on the still-growing newest chunk, which busts every window advance (#11).
+    if (chunkEnd === carryOverEnd) carryOverOrdinal = imageBlocks.length - 1;
   }
   if (imageBlocks.length === 0) {
     info.reason = 'render_empty';
@@ -492,11 +577,14 @@ export async function collapseHistory(
     role: 'user',
     content: syntheticContent,
   };
-  const head = messages.slice(0, protectedPrefix);
+  // Demote stale request text in the protected head so the session's opening turn
+  // can't surface as clean native text ahead of the history image and read as live.
+  const head = demoteProtectedHeadText(messages.slice(0, protectedPrefix));
   const tail = messages.slice(collapseLen);
   info.collapsedTurns = collapseLen - protectedPrefix;
   info.collapsedChars = text.length;
   info.collapsedImages = imageBlocks.length;
+  if (carryOverOrdinal >= 0) info.carryOverImageOrdinal = carryOverOrdinal;
   // [slab, history image, live tail] — slab cache_control anchor stays at the front.
   return { messages: [...head, syntheticUser, ...tail], info };
 }

@@ -745,7 +745,7 @@ async function historyImageSha8(
  * Pure relocation: it acts only when a slab image already carries the anchor, so
  * the total marker count never increases (pxpipe never *adds* — only moves).
  */
-function relocateAnchorToHistoryImage(messages: Message[] | undefined): void {
+function relocateAnchorToHistoryImage(messages: Message[] | undefined, anchorOrdinal?: number): void {
   if (!Array.isArray(messages)) return;
 
   // The synthetic history message is identified by its banner text block.
@@ -754,13 +754,20 @@ function relocateAnchorToHistoryImage(messages: Message[] | undefined): void {
     if (!Array.isArray(m.content)) continue;
     const first = m.content[0] as TextBlock | undefined;
     if (!first || first.type !== 'text' || first.text !== HISTORY_SYNTHETIC_INTRO) continue;
-    for (let i = m.content.length - 1; i >= 0; i--) {
-      const b = m.content[i];
+    // Collect this message's images in order, then pin the carry-over anchor (the last
+    // byte-stable history image) when collapseHistory provided its ordinal; otherwise
+    // fall back to the last image. Pinning the LAST image is the #11 bust: it's the
+    // newest, still-growing chunk and its bytes change on every window advance.
+    const imgsInMsg: Array<ImageBlock & { cache_control?: unknown }> = [];
+    for (const b of m.content) {
       if (b && (b as ImageBlock).type === 'image') {
-        historyImg = b as ImageBlock & { cache_control?: unknown };
-        break;
+        imgsInMsg.push(b as ImageBlock & { cache_control?: unknown });
       }
     }
+    historyImg =
+      anchorOrdinal !== undefined && anchorOrdinal >= 0 && anchorOrdinal < imgsInMsg.length
+        ? imgsInMsg[anchorOrdinal]
+        : imgsInMsg[imgsInMsg.length - 1];
     break;
   }
   if (!historyImg) return;
@@ -831,7 +838,7 @@ async function cachePrefixDigest(
     else if (Array.isArray(content))
       for (const b of content) parts.push(typeof b === 'string' ? b : JSON.stringify(b));
   }
-  const prefix = parts.join(' ');
+  const prefix = parts.join('\x00');
   return { sha8: await sha8(prefix), bytes: prefix.length };
 }
 
@@ -1889,7 +1896,7 @@ export async function transformRequest(
       // Move the single cache anchor onto the history image so slab + history
       // cache as one stable prefix (created once, then read), instead of the
       // history image re-creating whenever the caller's downstream marker moves.
-      relocateAnchorToHistoryImage(req.messages);
+      relocateAnchorToHistoryImage(req.messages, histInfo.carryOverImageOrdinal);
     } else if (histInfo.reason) {
       info.historyReason = histInfo.reason;
     }
