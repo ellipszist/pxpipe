@@ -18,7 +18,7 @@ import {
 // consumers import (pxpipe-proxy/transform → renderTextToImages), not the
 // internal leaf renderer.
 import { renderTextToImages } from './library.js';
-import { estimateImageCount, ANTHROPIC_PIXELS_PER_TOKEN, IMAGE_COST_SAFETY_MARGIN } from './transform.js';
+import { estimateImageCount, ANTHROPIC_PIXELS_PER_TOKEN, IMAGE_COST_SAFETY_MARGIN, REPORT_CHARS_PER_TOKEN } from './transform.js';
 import { openAIVisionTokens } from './openai.js';
 import {
   factSheetTextFromTokens,
@@ -30,8 +30,8 @@ import {
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_EXPORT_MODEL = 'claude-sonnet-4-5';
-/** Approximate chars-per-token ratio for raw source text. */
-export const CHARS_PER_TOKEN = 3.7;
+// Chars-per-token for the reporting estimate now lives in transform.ts as
+// REPORT_CHARS_PER_TOKEN (single source of truth for all token-estimate constants).
 /** Default column width — dense content mode (384 cols = 1928 px). */
 export const DEFAULT_EXPORT_COLS: number = DENSE_CONTENT_COLS;
 
@@ -282,7 +282,7 @@ export interface ExportTokenReport {
  * Uses the same formula as the internal gate:
  *   stripW = 2·PAD_X + cols·CELL_W
  *   imageTokens = estimateImageCount(text, cols) × exportImageTokens(model, stripW, MAX_HEIGHT_PX)
- *   textTokens = sourceText.length / CHARS_PER_TOKEN
+ *   textTokens = sourceText.length / REPORT_CHARS_PER_TOKEN
  *
  * `exportImageTokens` routes to the Anthropic billing formula (width×height/750×1.10)
  * for Claude models, and to the GPT tile-pricing formula for GPT/o-series models.
@@ -301,7 +301,7 @@ export function computeTokenReport(
   const estImages = estimateImageCount(sourceText, cols, 1, DENSE_CONTENT_CHARS_PER_IMAGE);
   const perStrip = exportImageTokens(model, stripW, MAX_HEIGHT_PX);
   const imageTokens = Math.round(estImages * perStrip);
-  const textTokens = Math.round(sourceText.length / CHARS_PER_TOKEN);
+  const textTokens = Math.round(sourceText.length / REPORT_CHARS_PER_TOKEN);
   const percentSaved =
     textTokens > 0
       ? Math.round(((textTokens - imageTokens) / textTokens) * 1000) / 10
@@ -438,7 +438,7 @@ export async function runExportCore(
   // Compute token costs using actual rendered image dimensions (more accurate than estimate).
   // exportImageTokens routes to the Anthropic billing formula for claude-* models and to
   // the GPT tile-pricing formula for GPT/o-series models.
-  const textTokens = Math.round(sourceText.length / CHARS_PER_TOKEN);
+  const textTokens = Math.round(sourceText.length / REPORT_CHARS_PER_TOKEN);
   let imageTokens = 0;
   for (const img of images) {
     imageTokens += exportImageTokens(opts.model, img.width, img.height);

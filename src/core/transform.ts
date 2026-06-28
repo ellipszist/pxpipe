@@ -173,6 +173,12 @@ export const SLAB_CHARS_PER_TOKEN = 2.0;
  *  History is even denser (tool_use JSON dominates), so 2.0 is doubly conservative. */
 export const HISTORY_CHARS_PER_TOKEN = 2.0;
 
+/** Chars-per-token for the `pxpipe export` *reporting* estimate (factsheet & savings %).
+ *  Less conservative than the gate's CHARS_PER_TOKEN=4: reporting wants an accurate
+ *  figure (~3.7 for source/prose text), not a safe-side under-estimate. Single source
+ *  of truth — src/core/export.ts imports this rather than redefining it. */
+export const REPORT_CHARS_PER_TOKEN = 3.7;
+
 /** Anthropic image-billing formula: `tokens ≈ width × height / 750`.
  *  https://docs.anthropic.com/en/docs/build-with-claude/vision#image-tokens
  *  Accurate to ~5% on dense glyph PNGs (N=14 empirical calibration). The renderer

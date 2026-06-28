@@ -13,7 +13,6 @@ import {
   exportImageTokens,
   DEFAULT_EXPORT_MODEL,
   DEFAULT_EXPORT_COLS,
-  CHARS_PER_TOKEN,
 } from '../src/core/export.js';
 import { extractFactSheetTokensAllPages, extractFactSheetTokens } from '../src/core/factsheet.js';
 import { DENSE_CONTENT_CHARS_PER_IMAGE } from '../src/core/render.js';
@@ -245,7 +244,7 @@ describe('parseExportArgv', () => {
 // ---------------------------------------------------------------------------
 
 describe('computeTokenReport', () => {
-  it('computes text tokens as sourceChars / CHARS_PER_TOKEN', () => {
+  it('computes text tokens as sourceChars / REPORT_CHARS_PER_TOKEN', () => {
     const text = 'a'.repeat(3700);
     const report = computeTokenReport(text, DEFAULT_EXPORT_COLS, DEFAULT_EXPORT_MODEL);
     // 3700 / 3.7 = 1000 tokens
@@ -453,7 +452,7 @@ describe('runExportCore integration', () => {
     expect(filenames).toContain('prompt.txt');
   });
 
-  it('tokenReport.textTokens is approximately sourceChars / CHARS_PER_TOKEN', async () => {
+  it('tokenReport.textTokens is approximately sourceChars / REPORT_CHARS_PER_TOKEN', async () => {
     const sourceText = 'x'.repeat(3700);
     const result = await runExportCore(sourceText, {
       sourceFiles: [],

@@ -641,13 +641,17 @@ export class DashboardState {
       // actually compressed AND we have a usable probe.
       creditSaving = haveBaseline && haveUsage && compressed;
 
-      // Warmth-free, cache-aware baseline. The cached prefix is paid identically
-      // on both paths (it's already inside actualInputEff) and cancels; we credit
-      // only the net-new uncached text pxpipe compressed away — honest, NO >=0
-      // floor (a net-losing cc-heavy turn lowers it). No per-session warmth state
-      // — so live update() and replay() agree exactly. Uncompressed rows fall
-      // back to actualInputEff so they contribute zero savings everywhere.
-      // See src/core/baseline.ts for the derivation + the 2026-06-16 audit.
+      // Cache-aware, warmth-aware baseline. INVARIANT: pxpipe is credited ONLY for
+      // the text it imaged away — NEVER for caching. The shared cached prefix is
+      // priced at the SAME warmth on both sides (deriveBaselineWarmth forces the
+      // text counterfactual warm whenever the actual got a read, cr>0), so the
+      // 0.10×/1.25× cache rates cancel and only the token-count reduction survives
+      // into the saving. Warmth can therefore only LOWER the credited saving, never
+      // raise it (pinned: savings-honesty.test.ts "OVERCLAIM GUARD"). No >=0 floor —
+      // a net-losing cc-heavy / cache-busted re-render lowers it honestly. Per-session
+      // warmth is keyed by firstUserSha8 and fed the persisted ts on replay, so live
+      // update() and replay() agree exactly. Uncompressed rows fall back to
+      // actualInputEff → zero savings. See src/core/baseline.ts + docs/CACHING_AND_SAVINGS.md.
       const cacheable = info?.baselineCacheableTokens ?? 0;
       // Cache-aware warmth: was this session's prefix warm (<TTL since its last
       // turn)? Decides whether the text counterfactual reads or re-creates. Keyed
