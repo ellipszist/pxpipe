@@ -423,14 +423,13 @@ export class DashboardState {
    *  ever carried a `firstUserSha8` (e.g. a cold start with only passthrough
    *  hits that the upstream probe never tagged). */
   private currentSessionId: string | null = null;
-  /** Per-session warmth for the cache-aware TEXT baseline: the wall-clock
-   *  second + cacheable-prefix size of each session's previous turn. A turn is
-   *  "warm" when <5min since the same session's last turn (Anthropic's cache
-   *  TTL), which decides whether the text counterfactual reads (0.10×) or
-   *  re-creates (1.25×) its prefix. Reconstructed identically in replay() from
-   *  persisted `ts`, so live and restored numbers agree. Capped with sessions. */
+  /** Per-session prior prefix size for the cache-aware TEXT baseline. Warm/cold
+   *  comes only from the server-observed cache_read on the actual request; this
+   *  map is used only after cr>0 to split the text counterfactual into reused vs
+   *  grown prefix tokens. Reconstructed identically in replay() from persisted
+   *  timestamps, so live and restored numbers agree. Capped with sessions. */
   private baselineWarmth: Map<string, { ts: number; cacheable: number; prefixSha?: string }> = new Map();
-  /** Anthropic prompt-cache TTL in seconds; a gap beyond this is a cold turn. */
+  /** Max age for reusing a prior prefix size after cr>0 has proved warmth. */
   private static readonly CACHE_TTL_SEC = 300;
   /** Hard cap on `sessions` Map entries. Keeps memory bounded in
    *  long-running deployments. 50 sessions × ~13 numeric fields each is
@@ -583,9 +582,8 @@ export class DashboardState {
     let rawBaseline: number; // raw text-only counterfactual tokens
     let baselineForRow: number; // baseline token count for contextHistory/recent
     let cacheReadForRow: number; // tokens to surface in the "Cache hits" column
-    let warmForRow: boolean; // did the TEXT baseline read warm? (wall-clock for
-    // Anthropic; cached_tokens>0 for GPT) — drives the Context Map narration so
-    // the sub-line can't contradict baselineInputEff on a cache-busted turn.
+    let warmForRow: boolean; // did the TEXT baseline read warm? Server-observed:
+    // Anthropic cr>0 or GPT cached_tokens>0. Drives Context Map narration.
 
     if (gpt) {
       // GPT cost model: no count_tokens probe, no cache-create premium, no
@@ -641,38 +639,29 @@ export class DashboardState {
       // actually compressed AND we have a usable probe.
       creditSaving = haveBaseline && haveUsage && compressed;
 
-      // Cache-aware, warmth-aware baseline. INVARIANT: pxpipe is credited ONLY for
-      // the text it imaged away — NEVER for caching. The shared cached prefix is
-      // priced at the SAME warmth on both sides (deriveBaselineWarmth forces the
-      // text counterfactual warm whenever the actual got a read, cr>0), so the
-      // 0.10×/1.25× cache rates cancel and only the token-count reduction survives
-      // into the saving. Warmth can therefore only LOWER the credited saving, never
-      // raise it (pinned: savings-honesty.test.ts "OVERCLAIM GUARD"). No >=0 floor —
-      // a net-losing cc-heavy / cache-busted re-render lowers it honestly. Per-session
-      // warmth is keyed by firstUserSha8 and fed the persisted ts on replay, so live
-      // update() and replay() agree exactly. Uncompressed rows fall back to
-      // actualInputEff → zero savings. See src/core/baseline.ts + docs/CACHING_AND_SAVINGS.md.
+      // Cache-aware, server-observed baseline. INVARIANT: pxpipe is credited ONLY
+      // for the text it imaged away — NEVER for caching. The imagined text path
+      // gets the same observed cache state as the actual request: cr>0 means warm
+      // for both, cr===0 means cold for both. No wall-clock-only inference.
+      // Uncompressed rows fall back to actualInputEff → zero savings.
       const cacheable = info?.baselineCacheableTokens ?? 0;
-      // Cache-aware warmth: was this session's prefix warm (<TTL since its last
-      // turn)? Decides whether the text counterfactual reads or re-creates. Keyed
-      // by firstUserSha8; live uses the wall clock, replay() the persisted ts.
+      // If cr>0 proved warmth, a completed prior with the same prefix refines the
+      // reused/grown split for the text baseline. Use request start for that
+      // lookup; an overlapping request that had not completed could not provide a
+      // prior prefix size for this in-flight request.
       const sidNow = info?.firstUserSha8;
       const prefixShaNow = info?.systemSha8;
-      const nowSec = Date.now() / 1000;
+      const completionSec = Date.now() / 1000;
+      const requestStartSec = completionSec - Math.max(0, ev.durationMs || 0) / 1000;
       const warmthPrev =
         typeof sidNow === 'string' && sidNow.length > 0
           ? this.baselineWarmth.get(sidNow)
           : undefined;
-      // Warmth = honest UNION of two witnesses the TEXT prefix was cached: a
-      // fresh same-session prior within the TTL AND the same static-prefix hash,
-      // OR cr>0 (an observed read). The hash guard matters when opencode changes
-      // system/tool guidance mid-session: same wall clock, different cache key.
-      // cr>0 still rescues the first post-restart turn that has no in-memory
-      // prior yet. Centralised in deriveBaselineWarmth so update()/replay()/
-      // sessions can't drift apart. See docs.
+      // Warmth itself is cr-only; prior state only estimates the warm split.
+      // Centralised in deriveBaselineWarmth so update()/replay()/sessions can't drift.
       const { warm, prevCacheable } = deriveBaselineWarmth(
         warmthPrev,
-        nowSec,
+        requestStartSec,
         cacheable,
         cr,
         DashboardState.CACHE_TTL_SEC,
@@ -689,12 +678,11 @@ export class DashboardState {
             prevCacheable,
           )
         : actualInputEff;
-      // Record this turn's warmth footprint for the next turn in this session.
-      // Touch on every usage-bearing row (the cache is warmed regardless of
-      // compression); carry the prior cacheable when this row has no probe.
+      // Record this completed turn's prefix size for future cr>0 split estimates.
+      // Carry the prior cacheable when this row has no probe.
       if (typeof sidNow === 'string' && sidNow.length > 0 && haveUsage) {
         this.baselineWarmth.set(sidNow, {
-          ts: nowSec,
+          ts: completionSec,
           cacheable: cacheable > 0 ? cacheable : (warmthPrev?.cacheable ?? 0),
           prefixSha: prefixShaNow ?? warmthPrev?.prefixSha,
         });
@@ -716,7 +704,7 @@ export class DashboardState {
       rawBaseline = baseline ?? 0;
       baselineForRow = baseline ?? 0;
       cacheReadForRow = cr;
-      warmForRow = warm; // union: fresh wall-clock prior OR cr>0 (see deriveBaselineWarmth)
+      warmForRow = warm; // server-observed cache read (cr>0)
     }
 
     // Record the request's transform breakdown for the Context Map panel. This
@@ -970,19 +958,19 @@ export class DashboardState {
         // compressed rows. Uncompressed/passthrough rows fall back to the
         // actual cost so they show zero saved (no fabricated savings).
         creditSaving = haveBaseline && haveUsage && compressed;
-        // Cache-aware warmth, reconstructed from persisted ts so replay matches
-        // the live update() path (see baselineWarmth field + update()).
+        // Warm/cold is reconstructed from server-observed cr only. Persisted
+        // completion ts + duration_ms are used only to find a prior prefix size
+        // for the reused/grown split after cr>0 has proved warmth.
         const sidR = (t as { first_user_sha8?: string }).first_user_sha8;
         const prefixShaR = (t as { system_sha8?: string }).system_sha8;
-        const tsSec = Date.parse(t.ts) / 1000;
+        const completionSecR = Date.parse(t.ts) / 1000;
+        const requestStartSecR = completionSecR - Math.max(0, t.duration_ms || 0) / 1000;
         const warmthPrevR =
           typeof sidR === 'string' && sidR.length > 0 ? this.baselineWarmth.get(sidR) : undefined;
-        // Same union warmth as update() (persisted ts instead of the live clock
-        // so replay reproduces live numbers exactly): matching-hash fresh prior
-        // OR cr>0. See deriveBaselineWarmth.
+        // Same cr-only warmth as update(); prior state only refines the split.
         const { warm: warmR, prevCacheable: prevCacheableR } = deriveBaselineWarmth(
           warmthPrevR,
-          tsSec,
+          requestStartSecR,
           cacheable,
           cr,
           DashboardState.CACHE_TTL_SEC,
@@ -1001,7 +989,7 @@ export class DashboardState {
           : actualInputEff;
         if (typeof sidR === 'string' && sidR.length > 0 && haveUsage) {
           this.baselineWarmth.set(sidR, {
-            ts: tsSec,
+            ts: completionSecR,
             cacheable: cacheable > 0 ? cacheable : (warmthPrevR?.cacheable ?? 0),
             prefixSha: prefixShaR ?? warmthPrevR?.prefixSha,
           });
@@ -1014,7 +1002,7 @@ export class DashboardState {
         rawBaseline = baseline ?? 0;
         baselineForRow = baseline ?? 0;
         cacheReadForRow = cr;
-        warmForRow = warmR; // wall-clock text warmth, NOT cr
+        warmForRow = warmR; // server-observed cache read
       }
       // Rebuild the Context Map breakdown so old rows keep their "Saved" value
       // and "Details" link after a restart. The PNG ring is in-memory and gone,

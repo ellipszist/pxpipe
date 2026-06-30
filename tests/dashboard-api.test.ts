@@ -350,23 +350,10 @@ describe('GPT savings split', () => {
   });
 });
 
-describe('union warmth: fresh wall-clock prior OR cr>0 (no phantom savings, no hidden losses)', () => {
-  // The text counterfactual's warmth is the honest UNION of two independent
-  // witnesses that the TEXT prefix was cached this turn: a fresh same-session
-  // prior within the TTL (wall clock), OR an observed read (cr>0). The text
-  // prefix is append-only, so a recent prior keeps it warm even when pxpipe
-  // busts its OWN image cache (cr=0) by re-rendering the prefix in place. On
-  // such a turn pxpipe really did pay the 1.25× create, so pricing the text
-  // baseline warm correctly SURFACES that re-imaging loss instead of hiding it
-  // behind a matching cold baseline — gating warmth on cr alone fabricated a
-  // win out of a real loss. (The cr>0 leg separately rescues the post-restart
-  // turn that has no in-memory prior yet but is provably cached on Anthropic's
-  // side.)
-
-  // A warm-priming turn followed by a cache-busted re-render (cr=0) in the SAME
-  // session within the TTL. The fresh prior makes the text baseline warm, so
-  // the row reads the still-cached text prefix cheaply and honestly shows the
-  // re-imaging loss rather than a phantom saving.
+describe('server-observed warmth: text follows actual cache_read', () => {
+  // The text counterfactual is hypothetical, so its cache state follows the only
+  // server-observed signal we have: cr>0 means warm for both paths, cr===0 means
+  // cold for both paths. A prior row only refines reused/grown split after cr>0.
   function antEvt(
     usage: {
       input_tokens: number;
@@ -397,8 +384,9 @@ describe('union warmth: fresh wall-clock prior OR cr>0 (no phantom savings, no h
     };
   }
 
-  it('surfaces the re-imaging loss on a cache-busted re-render within the TTL', async () => {
-    // Turn 1: genuine warm read — primes the per-session warmth map.
+  it('prices text cold when the actual image request has cache_read=0', async () => {
+    // Turn 1 records a prior prefix size, but it must not make a later cr=0 row
+    // warm by wall-clock inference alone.
     dash.update(
       antEvt(
         {
@@ -411,10 +399,8 @@ describe('union warmth: fresh wall-clock prior OR cr>0 (no phantom savings, no h
       ) as never,
     );
 
-    // Turn 2: pxpipe busted its OWN image cache and re-rendered the prefix in
-    // place — cache_read === 0, full re-create. But the TEXT prefix is
-    // append-only and still cached (fresh same-session prior within the TTL),
-    // so the text counterfactual is warm.
+    // Turn 2: actual request has cache_read === 0 and pays a full re-create.
+    // The imagined text path gets the same cold cache state.
     dash.update(
       antEvt(
         {
@@ -436,19 +422,59 @@ describe('union warmth: fresh wall-clock prior OR cr>0 (no phantom savings, no h
     // actual = 100 + 20000×1.25 = 25100 (what pxpipe actually paid this turn).
     expect(miss.actual_input).toBe(25100);
 
-    // WARM text baseline: a text-only client would have READ its still-cached
-    // append-only prefix at 0.1× (20000×0.1) + 10000 cold tail = 12000 — NOT
-    // the cold 20000×1.25 + 10000 = 35000 the old cr-alone rule produced.
-    expect(miss.baseline_input).toBe(12000);
-
-    // So this turn is an HONEST LOSS: pxpipe's re-imaging cost 13100 tokens more
-    // than a text-only client would have paid (12000 − 25100). The dashboard
-    // surfaces it — not floored, not hidden behind a matching cold baseline.
-    expect(miss.session_saved_so_far_delta).toBe(-13100);
-    expect(miss.session_saved_so_far_delta!).toBeLessThan(0);
+    // Cold text baseline: 20000×1.25 + 10000 tail = 35000.
+    expect(miss.baseline_input).toBe(35000);
+    expect(miss.session_saved_so_far_delta).toBe(9900);
   });
 
-  it('prices text cold when the static prefix hash changed inside the TTL', async () => {
+  it('does not let an overlapping request warm the text counterfactual before it completed', async () => {
+    writeEvents(tmp, [
+      ev({
+        ts: '2026-05-19T00:00:20.000Z',
+        duration_ms: 20_000,
+        compressed: true,
+        first_user_sha8: 'overlap',
+        system_sha8: 'stable-system',
+        baseline_probe_status: 'ok',
+        baseline_tokens: 30_000,
+        baseline_cacheable_tokens: 20_000,
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_create_tokens: 20_000,
+        cache_read_tokens: 0,
+      }),
+      ev({
+        // Starts at 00:00:15, five seconds BEFORE the prior request completed.
+        // cr>0 proves warmth, but that prior could not refine the text baseline's
+        // reused/grown split for this in-flight request.
+        ts: '2026-05-19T00:00:25.000Z',
+        duration_ms: 10_000,
+        compressed: true,
+        first_user_sha8: 'overlap',
+        system_sha8: 'stable-system',
+        baseline_probe_status: 'ok',
+        baseline_tokens: 32_000,
+        baseline_cacheable_tokens: 22_000,
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_create_tokens: 2_000,
+        cache_read_tokens: 20_000,
+      }),
+    ]);
+    await dash.replay(tmp.eventsFile);
+
+    const recent = (await dash.serveRecent().json()) as RecentPayload;
+    const overlap = recent.recent.at(-1)!;
+    expect(overlap.cache_read).toBe(20000);
+    expect(overlap.actual_input).toBe(4600);
+    // Warm via cr>0, but no completed prior was available at send time, so the
+    // text baseline assumes full reuse instead of using the overlapping prior:
+    // 22000×0.1 + 10000 tail = 12200.
+    expect(overlap.baseline_input).toBe(12200);
+    expect(overlap.session_saved_so_far_delta).toBe(7600);
+  });
+
+  it('prices text cold when cache_read=0 even if the static prefix hash changed inside the old TTL window', async () => {
     dash.update(
       antEvt(
         {
@@ -479,7 +505,7 @@ describe('union warmth: fresh wall-clock prior OR cr>0 (no phantom savings, no h
 
     const recent = (await dash.serveRecent().json()) as RecentPayload;
     const changed = recent.recent.at(-1)!;
-    // Static prefix changed, so the text-only path would create too:
+    // cache_read=0, so the text path is cold too:
     // baseline = 20000*1.25 + 10000 tail = 35000, not warm 12000.
     expect(changed.baseline_input).toBe(35000);
     expect(changed.session_saved_so_far_delta).toBe(9900);
@@ -522,8 +548,8 @@ describe('union warmth: fresh wall-clock prior OR cr>0 (no phantom savings, no h
 
   it('prices a warm read warm even with NO prior warmth state (post-restart)', async () => {
     // The cache is already warm on Anthropic's side (cr>0), but this process has
-    // never seen the session — exactly the first turn after a pxpipe restart, a
-    // >5min idle (TTL eviction), or a SESSION_CAP eviction. The OLD code required
+    // never seen the session — exactly the first turn after a pxpipe restart or a
+    // SESSION_CAP eviction. The OLD code required
     // an in-memory warmthPrev entry, so it fell through to the COLD branch and
     // billed the known-cached prefix the 1.25× CREATE rate — fabricating the
     // inflated "99% saved" row the operator reported. cr>0 is direct proof the

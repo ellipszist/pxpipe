@@ -8,58 +8,48 @@
 export const CACHE_CREATE_RATE = 1.25;
 export const CACHE_READ_RATE = 0.1;
 
-/** Anthropic prompt-cache TTL (seconds). A turn within this window of the same
- *  session's previous turn still finds its append-only text prefix cached. */
+/** Anthropic prompt-cache TTL (seconds). Kept for callers that display provider
+ *  docs, but savings math does not use TTL to infer a hypothetical text-cache
+ *  hit: text is considered warm only when the actual request reports cr > 0. */
 export const CACHE_TTL_SEC = 300;
 
-/** This session's previous usage-bearing turn, for wall-clock warmth. */
+/** This session's previous usage-bearing turn, used only for warm split sizing. */
 export interface BaselineWarmthPrev {
-  /** Wall-clock seconds of that turn. */
+  /** Completion time of that turn, in wall-clock seconds. */
   ts: number;
   /** Cacheable-prefix tokens measured that turn (0 if the probe missed). */
   cacheable: number;
-  /** Hash of the image-bound/static text prefix. If it changes, the text prefix
-   *  was not the same cache entry even inside the TTL. */
+  /** Hash of the image-bound/static text prefix. If it changes, do not reuse the
+   *  prior prefix size for this row's text reused/grown split. */
   prefixSha?: string;
 }
 
 /**
- * Decide whether the TEXT counterfactual's prefix was warm this turn, and what
- * prior prefix size to credit as reused.
+ * Decide whether the TEXT counterfactual's prefix was warm this turn.
  *
- * Warmth is the honest UNION of two independent witnesses that the text prefix
- * was cached this turn — warm iff EITHER fires:
+ * Strict accounting rule: the imagined text path gets the same observed cache
+ * state as the real image path. `cr > 0` is server proof that the request read a
+ * warm prefix, so the text baseline is warm too. `cr === 0` means the actual
+ * request did not read cache, so the text baseline is priced cold too. We do not
+ * use wall-clock TTL to claim that text would have been warm while images were
+ * cold; that would be an unobservable counterfactual and can create negative
+ * rows from cache assumptions rather than token savings.
  *
- *   1. WALL CLOCK — a fresh same-session prior within `ttlSec`. The text prefix
- *      is append-only and shares the session's prompt-cache TTL, so a recent
- *      prior turn proves it is still cached even when pxpipe busted its OWN image
- *      cache (cr === 0) by re-rendering the prefix in place this turn. This leg
- *      is decoupled from the image's cache state; the old `cr > 0`-only rule
- *      lacked it and mispriced cache-busted re-renders COLD, turning a real
- *      re-imaging LOSS into a fabricated "saving".
- *
- *   2. OBSERVED READ — cr > 0 directly witnesses Anthropic serving a cached
- *      prefix this turn. This rescues the first turn after a pxpipe restart /
- *      SESSION_CAP eviction while the cache is still warm (no in-memory prior,
- *      yet cr proves warmth). Without it that turn is priced COLD and fabricates
- *      an inflated "saved" row — the operator's original reported bug.
- *
- * Crucially, cr === 0 does NOT force cold when the prefix hash is unchanged
- * (leg 1 carries those turns); cr is only an ADDITIONAL sufficient witness,
- * never a necessary one. But a fresh prior with a different prefix hash is cold:
- * it is a different provider cache key, not an append-only continuation.
- * See docs/CACHING_AND_SAVINGS.md.
+ * When cr proves warmth, a completed same-prefix prior is used only to estimate
+ * how much of the text prefix was reused vs grown. If none is available, assume
+ * full reuse of this turn's cacheable prefix; this is conservative for savings.
  *
  * @param prev       this session's previous usage-bearing turn, or undefined.
- * @param nowSec     wall-clock seconds of the current turn (replay passes the
- *                   persisted ts so it reproduces the live decision exactly).
+ * @param nowSec     request-start wall-clock seconds, used only to reject prior
+ *                   rows that had not completed before this request was sent.
  * @param cacheable  this turn's cacheable-prefix tokens (the full-reuse credit
  *                   when warm only via cr, since cr proves a read but not the split).
- * @param cr         observed cache-read tokens this turn (the leg-2 witness).
- * @param ttlSec     cache TTL window (defaults to CACHE_TTL_SEC).
+ * @param cr         observed cache-read tokens this turn; the only warm/cold signal.
+ * @param ttlSec     legacy parameter; no longer decides warm/cold. It only
+ *                   bounds whether a prior prefix size is used for reused/grown
+ *                   splitting after cr > 0 has already proved warmth.
  * @param prefixSha  stable-prefix fingerprint for the text counterfactual. A
- *                   fresh wall-clock prior only proves warmth when this matches
- *                   the prior turn; otherwise the provider would see a new key.
+ *                   prior prefix size is reused only when this matches.
  */
 export function deriveBaselineWarmth(
   prev: BaselineWarmthPrev | undefined,
@@ -74,15 +64,12 @@ export function deriveBaselineWarmth(
     || prev.prefixSha === undefined
     || prefixSha === undefined
     || prev.prefixSha === prefixSha;
-  // Leg 1: a fresh same-session prior within the TTL (wall-clock warmth).
+  // cr is the only warm/cold signal. A prior only refines the warm split.
+  if (!(cr > 0)) return { warm: false, prevCacheable: 0 };
+  // Fresh prior: use its real prefix size for the reused/grown split. Without
+  // one, cr proves warmth but not the split, so assume full reuse.
   const freshPrior = prev !== undefined && age >= 0 && age < ttlSec && samePrefix;
-  // Leg 2: an observed read directly witnesses a warm cache. Union of the two.
-  const warm = freshPrior || cr > 0;
-  // Fresh prior → credit its real measured prefix as reused (the reused/grown
-  // split). Warm only via cr (no usable prior) → cr proves a read happened but
-  // not the split, so assume full reuse of this turn's cacheable prefix.
-  const prevCacheable = freshPrior ? prev!.cacheable : warm ? cacheable : 0;
-  return { warm, prevCacheable };
+  return { warm: true, prevCacheable: freshPrior ? prev!.cacheable : cacheable };
 }
 
 /**

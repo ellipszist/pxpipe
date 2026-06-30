@@ -147,8 +147,8 @@ describe('aggregateSessions', () => {
         cache_create_tokens: 800,
         cache_read_tokens: 100,
       }),
-      // WARM turn (same session, same ts < TTL): prior cacheable 18000 >= 9000,
-      //   so the whole prefix is reused @0.1 = 900. actual = 5 + 8000*0.1 = 805.
+      // WARM turn because cr>0. Prior cacheable 18000 >= 9000, so the whole
+      //   text prefix is reused @0.1 = 900. actual = 5 + 8000*0.1 = 805.
       //   saved = 95.
       ev({
         first_user_sha8: 'aaaaaaaa',
@@ -194,10 +194,9 @@ describe('aggregateSessions', () => {
         input_tokens: 5,
         cache_read_tokens: 90_000,
       }),
-      // Genuine loss turn: tiny body (2000) but pp wrote 5000 cache_create. The
-      //   prior turn was a probe miss (no cacheable recorded), so warmth carries
-      //   prevCacheable=0 -> no reuse credited: text re-creates 1900 prefix at
-      //   1.25x. baseline = 1900*1.25 + 100 = 2475 ; actual = 3000 + 5000*1.25
+      // Genuine loss turn: tiny body (2000) but pxpipe wrote 5000 cache_create.
+      //   cr=0, so text is cold too and re-creates 1900 prefix at 1.25x:
+      //   baseline = 1900*1.25 + 100 = 2475 ; actual = 3000 + 5000*1.25
       //   = 9250. saved = 2475 - 9250 = -6775. Honest formula, no clamp.
       ev({
         first_user_sha8: 'bbbbbbbb',
@@ -215,20 +214,14 @@ describe('aggregateSessions', () => {
     expect(s.charsSaved).toBe(-6_775 * 4);
   });
 
-  it('prices a busted image re-render within the TTL as a real loss (text stays warm)', async () => {
-    // Two turns 60s apart — well inside the 300s TTL. Turn 2's cache_read_tokens
-    // === 0: pxpipe's IMAGE cache missed and it re-created the prefix (cc>0).
-    // But the text counterfactual's prefix is APPEND-ONLY — turn 1 cached it and
-    // it is still warm 60s later regardless of what pxpipe's images did. So the
-    // honest price is WARM for text: this turn pxpipe genuinely LOST tokens by
-    // busting an image cache that text would have read for free. cr ALONE (the
-    // old rule) called turn 2 cold and fabricated a 31250 "win" it never earned.
-    // Empirically 12.8% of warm turns hit this cr=0 / text-warm shape — see
-    // docs/CACHING_AND_SAVINGS.md.
+  it('prices text cold when the actual request has cache_read=0', async () => {
+    // Turn 2 is 60s after turn 1, but cr=0 means the server did not report a
+    // cache read for the actual request. The imagined text path gets the same
+    // cold cache state; no wall-clock-only cache warmth is credited.
     writeEvents(tmp, [
-      // Turn 1 (genuine cold first turn) — establishes a 28k cacheable prefix.
+      // Turn 1 (genuine cold first turn).
       //   cold baseline = 28000*1.25 + 2000 tail = 37000 ; actual = 2000 + 3000*1.25 = 5750
-      //   saved = 31250. (Also seeds warmth: ts + prevCacheable=28000.)
+      //   saved = 31250. (Also records prevCacheable=28000 for future cr>0 rows.)
       ev({
         first_user_sha8: 'cccccccc',
         ts: '2026-05-19T00:00:00.000Z',
@@ -239,11 +232,8 @@ describe('aggregateSessions', () => {
         cache_create_tokens: 3_000,
         cache_read_tokens: 0,
       }),
-      // Turn 2, +60s (inside TTL), cache_read_tokens=0 — pxpipe re-rendered and
-      // its image cache missed. Text was still warm (append-only prefix, 60s old):
-      //   WARM (correct): reused 28000@0.1 = 2800 + 2000 tail = 4800 ; actual = 5750 ;
-      //     saved = 4800 - 5750 = -950 — the real cost of busting a warm image cache.
-      //   COLD (old cr-alone bug): baseline = 28000*1.25 + 2000 = 37000 ; saved = 31250 fabricated.
+      // Turn 2, +60s, cache_read_tokens=0 — actual request is cold, so the text
+      // counterfactual is cold too: baseline = 28000*1.25 + 2000 = 37000.
       ev({
         first_user_sha8: 'cccccccc',
         ts: '2026-05-19T00:01:00.000Z',
@@ -257,9 +247,46 @@ describe('aggregateSessions', () => {
     ]);
     const { sessions } = await aggregateSessions(tmp);
     const s = sessions.get('cccccccc')!;
-    // 31250 (honest cold win) + (-950) (honest busted-rerender loss) = 30300.
-    // The old cr-alone code booked the second turn as +31250 → a 62500 overclaim.
-    expect(s.tokensSavedEst).toBe(30_300);
+    // 31250 + 31250. No hypothetical text-cache read is credited on cr=0.
+    expect(s.tokensSavedEst).toBe(62_500);
+  });
+
+  it('does not treat an overlapping in-flight request as a completed warm prior', async () => {
+    writeEvents(tmp, [
+      ev({
+        first_user_sha8: 'eeeeeeee',
+        system_sha8: 'stable-system',
+        ts: '2026-05-19T00:00:20.000Z',
+        duration_ms: 20_000,
+        compressed: true,
+        baseline_tokens: 30_000,
+        baseline_cacheable_tokens: 20_000,
+        input_tokens: 100,
+        cache_create_tokens: 20_000,
+        cache_read_tokens: 0,
+      }),
+      ev({
+        // Starts at 00:00:15, before the previous request completed at 00:00:20.
+        // cr>0 proves warmth, but the prior row was not available to split the
+        // text baseline into reused/grown tokens at this request's send time.
+        first_user_sha8: 'eeeeeeee',
+        system_sha8: 'stable-system',
+        ts: '2026-05-19T00:00:25.000Z',
+        duration_ms: 10_000,
+        compressed: true,
+        baseline_tokens: 32_000,
+        baseline_cacheable_tokens: 22_000,
+        input_tokens: 100,
+        cache_create_tokens: 2_000,
+        cache_read_tokens: 20_000,
+      }),
+    ]);
+    const { sessions } = await aggregateSessions(tmp);
+    const s = sessions.get('eeeeeeee')!;
+    // Turn 1 saved 9900. Turn 2 is warm via cr>0, but with no completed prior at
+    // send time it assumes full reuse: baseline = 22000*0.1 + 10000 = 12200;
+    // actual = 100 + 2000*1.25 + 20000*0.1 = 4600; saved = 7600.
+    expect(s.tokensSavedEst).toBe(17_500);
   });
 
   it('does not treat a fresh prior as warm when the static prefix hash changed', async () => {
@@ -293,8 +320,8 @@ describe('aggregateSessions', () => {
     const s = sessions.get('dddddddd')!;
     // Turn 1: baseline full-reuse via cr = 20000*0.1 + 10000 = 12000;
     // actual = 100 + 20000*0.1 = 2100; saved = 9900.
-    // Turn 2: static hash changed, so text is cold too: baseline = 35000;
-    // actual = 25100; saved = 9900. Old wall-clock-only warmth booked -13100.
+    // Turn 2: cr=0, so text is cold too: baseline = 35000;
+    // actual = 25100; saved = 9900. No wall-clock-only warmth is credited.
     expect(s.tokensSavedEst).toBe(19_800);
   });
 });

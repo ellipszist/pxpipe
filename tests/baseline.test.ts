@@ -70,15 +70,12 @@ describe('computeBaselineInputEff (warmth-aware)', () => {
 });
 
 /**
- * deriveBaselineWarmth decides WHEN the text counterfactual was warm — the
- * honest UNION of two independent witnesses that the text prefix was cached:
- *   1. a fresh same-session prior within the TTL (wall clock), and
- *   2. an observed read (cr>0).
- * cr === 0 does NOT force cold — the wall-clock leg carries a cache-busted
- * re-render — and the cr leg rescues the post-restart turn that has no in-memory
- * prior yet. The old rule used cr ALONE (cr necessary), which mispriced both.
+ * deriveBaselineWarmth decides WHEN the text counterfactual was warm. The rule
+ * is server-observed: text is warm iff the actual request reported cr>0. A prior
+ * completed turn can refine reused-vs-grown prefix size after cr has proved a
+ * warm read, but it never makes a cr===0 row warm by itself.
  */
-describe('deriveBaselineWarmth (honest union: fresh prior in TTL OR cr>0)', () => {
+describe('deriveBaselineWarmth (server-observed: cr>0 only)', () => {
   const prev = (ts: number, cacheable: number, prefixSha?: string) => ({
     ts,
     cacheable,
@@ -96,26 +93,24 @@ describe('deriveBaselineWarmth (honest union: fresh prior in TTL OR cr>0)', () =
     expect(deriveBaselineWarmth(undefined, 1000, 5000, 100)).toEqual({ warm: true, prevCacheable: 5000 });
   });
 
-  it('THE FIX: warm via a fresh prior even when cr===0 (pxpipe busted its own image cache)', () => {
-    // 60s since the last turn, image cache missed (cr=0) — text prefix is still
-    // cached. The old cr-alone rule returned cold here and fabricated savings.
+  it('keeps text cold when cr===0 even with a fresh prior', () => {
+    // The text path is hypothetical. Without a server-observed read on the real
+    // request, do not claim the text counterfactual would have read cache.
     expect(deriveBaselineWarmth(prev(1000, 8000), 1060, 5000, 0)).toEqual({
-      warm: true,
-      prevCacheable: 8000,
-    });
-  });
-
-  it('cold when the fresh prior has a different static-prefix hash', () => {
-    // Same session + inside TTL is not enough: if the system/tool prefix changed,
-    // the text-only request would use a different prompt-cache key too.
-    expect(deriveBaselineWarmth(prev(1000, 8000, 'old'), 1060, 5000, 0, CACHE_TTL_SEC, 'new')).toEqual({
       warm: false,
       prevCacheable: 0,
     });
   });
 
-  it('keeps the fresh-prior warmth when the static-prefix hash matches', () => {
-    expect(deriveBaselineWarmth(prev(1000, 8000, 'same'), 1060, 5000, 0, CACHE_TTL_SEC, 'same')).toEqual({
+  it('observed read is warm even when the prior hash cannot refine the split', () => {
+    expect(deriveBaselineWarmth(prev(1000, 8000, 'old'), 1060, 5000, 10, CACHE_TTL_SEC, 'new')).toEqual({
+      warm: true,
+      prevCacheable: 5000,
+    });
+  });
+
+  it('uses a matching fresh prior only to refine the warm reused/grown split', () => {
+    expect(deriveBaselineWarmth(prev(1000, 8000, 'same'), 1060, 5000, 10, CACHE_TTL_SEC, 'same')).toEqual({
       warm: true,
       prevCacheable: 8000,
     });
@@ -129,8 +124,8 @@ describe('deriveBaselineWarmth (honest union: fresh prior in TTL OR cr>0)', () =
   });
 
   it('a fresh prior gives the real prior prefix size; cr-only warmth assumes full reuse', () => {
-    // fresh prior → prevCacheable = prev.cacheable (real reused/grown split)
-    expect(deriveBaselineWarmth(prev(1000, 3000), 1100, 5000, 0).prevCacheable).toBe(3000);
+    // observed read + fresh prior → prevCacheable = prev.cacheable (real reused/grown split)
+    expect(deriveBaselineWarmth(prev(1000, 3000), 1100, 5000, 50).prevCacheable).toBe(3000);
     // warm via cr but stale prior → full-reuse assumption (prevCacheable = cacheable)
     expect(deriveBaselineWarmth(prev(0, 3000), 1_000_000, 5000, 50).prevCacheable).toBe(5000);
   });
@@ -144,7 +139,7 @@ describe('deriveBaselineWarmth (honest union: fresh prior in TTL OR cr>0)', () =
     // Whichever way warmth resolves, pricing warm must not claim MORE savings
     // than cold for the same prefix (warm lowers, or holds, the baseline).
     const cacheable = 4000;
-    const { warm, prevCacheable } = deriveBaselineWarmth(prev(1000, 4000), 1100, cacheable, 0);
+    const { warm, prevCacheable } = deriveBaselineWarmth(prev(1000, 4000), 1100, cacheable, 50);
     // inp/cc/cr only feed the probe-miss branch (cacheable>0 here ⇒ unused).
     const warmEff = computeBaselineInputEff(5000, cacheable, 0, 0, 0, warm, prevCacheable);
     const coldEff = computeBaselineInputEff(5000, cacheable, 0, 0, 0, false, 0);

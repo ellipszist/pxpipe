@@ -136,9 +136,10 @@ export async function aggregateSessions(
 ): Promise<AggregateResult> {
   const sessions = new Map<string, SessionSummary>();
   const sidecarsBySession = new Map<string, Set<string>>();
-  // Per-session warmth for the cache-aware text counterfactual, reconstructed
-  // from event ts as we scan in time order (mirrors DashboardState). Kept out
-  // of SessionSummary so it never leaks into the /api/sessions.json shape.
+  // Per-session prior prefix sizes for the cache-aware text counterfactual.
+  // Warm/cold comes only from server-observed cache_read; this map only refines
+  // reused/grown splitting after cr>0 has proved warmth. Kept out of
+  // SessionSummary so it never leaks into the /api/sessions.json shape.
   const warmth = new Map<string, { ts: number; cacheable: number; prefixSha?: string }>();
   const CACHE_TTL_SEC = 300;
 
@@ -172,18 +173,9 @@ export async function aggregateSessions(
     // rare and the first cwd is the most stable identifier.
     if (s.project === undefined && ev.cwd) s.project = ev.cwd;
     // Real per-session savings, cache-aware. See src/core/baseline.ts for the
-    // full derivation: the cached prefix cancels (paid identically on both
-    // paths), so we credit only the net-new uncached text pxpipe compressed
-    // away — honest `baselineEff − actualEff`, NO >=0 floor, so a net-losing
-    // turn (cc-heavy rewrite) lowers the total. Warmth decides whether the text
-    // counterfactual reads (0.10×) or re-creates (1.25×) the cacheable prefix:
-    // the text prefix's warmth tracks its OWN wall-clock stability (a fresh
-    // same-session prior within the TTL), decoupled from whether pxpipe busted
-    // its IMAGE cache this turn — so a cache-busted re-render (`cr === 0`) under
-    // a warm clock still reads warm for text, and we don't fabricate a 1.25×
-    // create it never would have paid. An observed read (`cr > 0`) is the other
-    // leg, rescuing post-restart turns with no in-memory prior. See
-    // deriveBaselineWarmth for the exact union.
+    // full derivation: pxpipe is credited only for token reduction, never for
+    // caching. The imagined text baseline gets the SAME observed cache state as
+    // the actual request: cr>0 means warm for both, cr===0 means cold for both.
     // Events missing either probe stay out of the rollup — no estimation.
     const inp = ev.input_tokens ?? 0;
     const cc = ev.cache_create_tokens ?? 0;
@@ -197,16 +189,14 @@ export async function aggregateSessions(
     ) {
       const cacheable = ev.baseline_cacheable_tokens ?? 0;
       const prefixSha = ev.system_sha8;
-      const tsSec = Date.parse(ev.ts) / 1000;
+      const completionSec = Date.parse(ev.ts) / 1000;
+      const requestStartSec = completionSec - Math.max(0, ev.duration_ms || 0) / 1000;
       const prev = warmth.get(id);
-      // Warmth = honest union (mirrors dashboard.ts, centralised in
-      // deriveBaselineWarmth): warm iff a fresh same-session prior is within the
-      // TTL AND has the same static-prefix hash, OR cr>0 witnesses a read. cr=0
-      // no longer forces cold when the hash matches (cache-busted image re-render),
-      // and cr>0 rescues the first post-restart turn with no in-memory prior.
+      // Warmth is cr-only; a completed same-prefix prior only refines the
+      // reused/grown split after cr>0 has proved warmth.
       const { warm, prevCacheable } = deriveBaselineWarmth(
         prev,
-        tsSec,
+        requestStartSec,
         cacheable,
         cr,
         CACHE_TTL_SEC,
@@ -226,16 +216,15 @@ export async function aggregateSessions(
       s.tokensSavedEst += Math.round(tokensSaved);
       s.charsSaved += Math.round(tokensSaved * 4);
     }
-    // Warm the cache for the next turn in this session (every usage-bearing
-    // row warms it, regardless of compression). Carry prior cacheable when this
-    // row had no probe so a probe gap doesn't reset warmth.
+    // Record this completed row's prefix size for future cr>0 split estimates.
+    // Carry prior cacheable when this row had no probe.
     if (haveUsage) {
-      const tsSec = Date.parse(ev.ts) / 1000;
+      const completionSec = Date.parse(ev.ts) / 1000;
       const cacheable = ev.baseline_cacheable_tokens ?? 0;
       const prefixSha = ev.system_sha8;
       const prev = warmth.get(id);
       warmth.set(id, {
-        ts: tsSec,
+        ts: completionSec,
         cacheable: cacheable > 0 ? cacheable : (prev?.cacheable ?? 0),
         prefixSha: prefixSha ?? prev?.prefixSha,
       });

@@ -6,12 +6,9 @@
  * the exact contradiction that made the number untrustworthy. These tests pin
  * the two panels together.
  *
- * Warmth is the UNION decision from deriveBaselineWarmth (a fresh same-session
- * prior within the cache TTL OR an observed read), carried on
- * ContextMapData.warm and decoupled from the image request's own cache_read.
- * The narration is keyed on c.warm (text warmth), NOT raw cache_read, so it can
- * never contradict baselineInputEff on a cache-busted re-render (text warm at
- * 0.1× while the image was re-created cold).
+ * Warmth is server-observed: ContextMapData.warm is true only when the actual
+ * request reported cache_read > 0. The narration must never claim a hypothetical
+ * text cache read on a cache_read=0 row.
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -101,10 +98,9 @@ describe('renderContextMapFragment — cache-aware headline', () => {
 
 describe('renderContextMapFragment — cold vs warm honesty', () => {
   // The headline/sub-line must not claim a 0.1× read discount on a turn whose
-  // text prefix was NOT warm. Warmth is c.warm (the union decision), not the
-  // image's raw cache_read. On a cold turn (no fresh prior and no read — e.g.
-  // the first turn of a big document) the text baseline's prefix is priced at
-  // the 1.25× create rate, so "cached text" / "reads at 0.1×" would be a lie.
+  // actual request had no cache read. On a cold turn the text baseline's prefix
+  // is priced at the 1.25× create rate too, so "cached text" / "reads at 0.1×"
+  // would be counting unobserved cache as savings.
   it('COLD turn (no warmth): no read discount claimed, text is not called "cached"', () => {
     const html = renderContextMapFragment(
       ctx({
@@ -166,33 +162,23 @@ describe('renderContextMapFragment — cold vs warm honesty', () => {
     expect(html).not.toContain('cheap cache-read');
   });
 
-  it('cache-busted re-render within the TTL: text stays warm, image missed → loss surfaced without contradiction', () => {
-    // The union regression case (point 1). pxpipe re-imaged the append-only
-    // prefix in place: the IMAGE missed its cache (cacheRead === 0) and paid the
-    // 1.25× create, but the TEXT counterfactual is still warm (fresh same-session
-    // prior within the TTL — c.warm === true). So the cache-weighted baseline is
-    // the cheap warm read, the row is an honest LOSS (image actual > warm text),
-    // and the narration must NOT fall into the cold branch and price the text at
-    // the create rate — that would hide the loss behind a matching cold baseline.
+  it('cache_read=0: text is cold too, no cache-busted warm-text narration', () => {
     const html = renderContextMapFragment(
       ctx({
-        warm: true,
+        warm: false,
         cacheRead: 0,
-        baselineInputEff: 1000,
-        actualInputEff: 2000,
-        baselineTokens: 4000,
+        baselineInputEff: 3500,
+        actualInputEff: 2500,
+        baselineTokens: 3000,
         realInput: 2000,
       }),
       [],
     );
-    // Honest loss in the headline, against the WARM ("cached text") basis.
-    expect(html).toContain('bigger');
-    expect(html).toContain('for cached text');
-    // The image-busted explanation — text warm, image cold, loss surfaced.
-    expect(html).toContain('re-imaged the prefix and missed the image cache');
-    expect(html).toContain('the text would have read warm');
-    // It is NOT the cold branch: the text really was warm this turn.
-    expect(html).not.toContain('No warm text cache this turn');
+    expect(html).toContain('smaller');
+    expect(html).toContain('text would bill as');
+    expect(html).toContain('No warm text cache this turn');
+    expect(html).not.toContain('cached text');
+    expect(html).not.toContain('re-imaged the prefix and missed the image cache');
   });
 });
 
