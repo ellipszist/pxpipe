@@ -19,7 +19,7 @@ LOG_OFF="$HOME/.pxpipe/ec-off.jsonl"
 case "${1:-fable}" in
   fable)  MODEL=claude-fable-5 ;;
   opus)   MODEL=claude-opus-4-8 ;;
-  sonnet) MODEL=claude-sonnet-4-6 ;;
+  sonnet) MODEL=claude-sonnet-5 ;;
   haiku)  MODEL=claude-haiku-4-5 ;;
   *)      MODEL="$1" ;;
 esac

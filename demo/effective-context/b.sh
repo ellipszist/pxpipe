@@ -19,15 +19,15 @@ fi
 PROMPT='context/ has needle.txt plus filler-NNN.txt files. Using the Read tool on each file individually (do NOT use grep, bash, find, or any search tool — I need every file actually read into your context): FIRST read needle.txt, THEN read every filler-NNN.txt in numerical order. As you read, COUNT the lines that contain the exact token "AUDIT-ZX9". Only after reading ALL files, answer using only what you read: (1) the final ledger balance of account ZX-9 from needle.txt, (2) how many lines contained "AUDIT-ZX9", and (3) their sum. Reply as: balance=<n>, count=<m>, final=<n+m>.'
 
 # Model: defaults to Fable 5; override with the first arg (friendly name or full id):
-#   ./b.sh        → claude-fable-5       ./b.sh opus → claude-opus-4-8[1m]
-#   ./b.sh sonnet → claude-sonnet-4-6    ./b.sh claude-... → used verbatim
+#   ./b.sh        → claude-fable-5         ./b.sh opus → claude-opus-4-8[1m]
+#   ./b.sh sonnet → claude-sonnet-5[1m]    ./b.sh claude-... → used verbatim
 # NOTE: for pxpipe to actually compress, the :47824 proxy must allow this model
 # (Fable-only by default — see PXPIPE_MODELS or the dashboard "compress models"
 # chips). A model the proxy doesn't cover just passes through uncompressed.
 case "${1:-fable}" in
   fable)  MODEL=claude-fable-5 ;;
   opus)   MODEL=claude-opus-4-8[1m] ;;
-  sonnet) MODEL=claude-sonnet-4-6 ;;
+  sonnet) MODEL=claude-sonnet-5[1m] ;;
   haiku)  MODEL=claude-haiku-4-5 ;;
   *)      MODEL="$1" ;;
 esac

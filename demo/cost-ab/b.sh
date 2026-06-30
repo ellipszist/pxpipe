@@ -18,15 +18,15 @@ fi
 PROMPT='This project has a failing test suite. Read SPEC.md and the source, then fix src/pricing.js so it follows SPEC.md exactly and the test suite (node --test) passes. Run the tests to confirm.'
 
 # Model: defaults to Fable 5; override with the first arg (friendly name or full id):
-#   ./b.sh        → claude-fable-5       ./b.sh opus → claude-opus-4-8[1m]
-#   ./b.sh sonnet → claude-sonnet-4-6    ./b.sh claude-... → used verbatim
+#   ./b.sh        → claude-fable-5         ./b.sh opus → claude-opus-4-8[1m]
+#   ./b.sh sonnet → claude-sonnet-5[1m]    ./b.sh claude-... → used verbatim
 # NOTE: for pxpipe to actually compress, the :47824 proxy must allow this model
 # (Fable-only by default — see PXPIPE_MODELS or the dashboard "compress models"
 # chips). A model the proxy doesn't cover just passes through uncompressed.
 case "${1:-fable}" in
   fable)  MODEL=claude-fable-5 ;;
   opus)   MODEL=claude-opus-4-8[1m] ;;
-  sonnet) MODEL=claude-sonnet-4-6 ;;
+  sonnet) MODEL=claude-sonnet-5[1m] ;;
   haiku)  MODEL=claude-haiku-4-5 ;;
   *)      MODEL="$1" ;;
 esac
