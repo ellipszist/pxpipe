@@ -16,7 +16,7 @@ if [ -z "$CB" ]; then
   else echo "claude not found — set CLAUDE_BIN=/path/to/claude"; exit 1; fi
 fi
 
-PROMPT='context/ has needle.txt plus filler-NNN.txt files. Using the Read tool on each file individually (do NOT use grep, bash, find, or any search tool — I need every file actually read into your context): FIRST read needle.txt, THEN read every filler-NNN.txt in numerical order. As you read, COUNT the lines that contain the exact token "AUDIT-ZX9". Only after reading ALL files, answer using only what you read: (1) the final ledger balance of account ZX-9 from needle.txt, (2) how many lines contained "AUDIT-ZX9", and (3) their sum. Reply as: balance=<n>, count=<m>, final=<n+m>.'
+PROMPT='context/ has needle.txt plus filler-NNN.txt files. Using the Read tool on each file individually (do NOT use grep, bash, find, or any search tool — I need every file actually read into your context): FIRST read needle.txt, THEN read every filler-NNN.txt in numerical order starting at filler-000 (numbering starts at 000, not 001). As you read, COUNT the lines that contain the exact token "AUDIT-ZX9". Only after reading ALL files, answer using only what you read: (1) the final ledger balance of account ZX-9 from needle.txt, (2) how many lines contained "AUDIT-ZX9", and (3) their sum. Reply as: balance=<n>, count=<m>, final=<n+m>. HARD REQUIREMENT: your FINAL message must end with exactly that one line — do not stop, summarize, or ask a question without emitting it.'
 
 # Model: defaults to Fable 5; override with the first arg (friendly name or full id):
 #   ./b.sh        → claude-fable-5[1m]     ./b.sh opus → claude-opus-4-8[1m]
