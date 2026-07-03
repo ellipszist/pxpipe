@@ -4,6 +4,20 @@ All notable changes to pxpipe are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor = features /
 behavioral changes, patch = fixes).
 
+## 0.7.2 — 2026-07-03
+
+### Fixed
+- **History collapse no longer truncates the opening task prompt.** When a
+  long run pushed the opening user turn past the demotion boundary, the
+  collapsed turn carried only a ~300-char preview
+  (`LATEST_COLLAPSED_USER_PREVIEW_CHARS`) — the actual question could be cut
+  off entirely, and the model answered from whatever fragment survived. The
+  most recent collapsed user turn now rides along verbatim (up to
+  `LATEST_COLLAPSED_USER_VERBATIM_CHARS`, default 4000). Verified end-to-end
+  on the effective-context needle bench: with collapse actively engaged
+  (10 turns demoted), the model reproduces the ground-truth answer exactly.
+  (#7)
+
 ## 0.7.1 — 2026-07-03
 
 ### Fixed
