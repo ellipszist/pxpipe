@@ -155,12 +155,17 @@ describe('per-model pricing is applied correctly (Fable vs Opus vs GPT)', () => 
     expect(CACHE_READ_RATE).toBe(0.1);
   });
 
-  it('GPT cached-read discount is model-GATED: gpt-5.x → 0.1×, others must NOT get it', () => {
-    // pxpipe images gpt-5.x only; pricing a non-gpt-5 row at the aggressive 0.1×
-    // would overstate its cache savings. The gate keeps families from bleeding
-    // each other's rates.
+  it('cached-read discount is model-GATED: gpt-5.x and claude → 0.1×, other GPT must NOT get it', () => {
+    // pxpipe images gpt-5.x and (via the Codex->Anthropic bridge) claude-*.
+    // Both bill cache reads at 0.1x. Pricing an unrelated GPT row at the
+    // aggressive 0.1x would overstate its cache savings, so the fallback stays
+    // 0.5x. The gate keeps families from bleeding each other's rates.
     expect(openAICacheReadRate('gpt-5.6')).toBe(0.1);
     expect(openAICacheReadRate('gpt-5.5')).toBe(0.1);
+    // claude models arrive here through the bridge and must use Anthropic's rate.
+    expect(openAICacheReadRate('claude-opus-4-8')).toBe(0.1);
+    expect(openAICacheReadRate('grok-4.5')).toBe(0.25);
+    expect(openAICacheReadRate('claude-sonnet-5')).toBe(0.1);
     expect(openAICacheReadRate('gpt-4o')).not.toBe(0.1);
     expect(openAICacheReadRate(undefined)).not.toBe(0.1);
   });

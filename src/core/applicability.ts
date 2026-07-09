@@ -25,11 +25,15 @@ function baseModelId(model: string): string {
 let runtimeModelBases: readonly string[] | null = null;
 
 /** Built-in default scope when PXPIPE_MODELS is unset: Fable 5 (Claude) plus
- *  GPT 5.6. GPT 5.5 and Opus 4.8 are intentionally off — same pipeline but
- *  measurably worse at reading imaged content (FINDINGS.md 2026-06-16: Opus 4.8
- *  ~2pp arithmetic, 6/15 dense-hex recall vs Fable's 100/100; GPT 5.5 likewise
- *  degrades on imaged history/context) — so silently imaging them is the wrong
- *  default. Both stay opt-in via the dashboard chips or PXPIPE_MODELS. */
+ *  GPT 5.6. Everything else is opt-in via dashboard chips or PXPIPE_MODELS:
+ *  - Opus 4.7/4.8 — worse at reading imaged content (FINDINGS.md 2026-06-16:
+ *    Opus 4.8 ~2pp arithmetic, 6/15 dense-hex vs Fable 100/100).
+ *  - GPT 5.5 — degrades on imaged history/context.
+ *  - Grok — pure-image exact OCR fails at production 5×8 (0/4 IDs); image+
+ *    factsheet recovers exact IDs but the family is not default-quality for
+ *    pxpipe yet (eval/grok-density/FACTSHEET_RESULTS.md). Keep off until that
+ *    changes.
+ *  Silently imaging weak readers is the wrong default. */
 const DEFAULT_MODEL_BASES = ['claude-fable-5', 'gpt-5.6'];
 
 function falsey(v: string): boolean {

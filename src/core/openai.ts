@@ -24,6 +24,8 @@ import {
   compactSlabWhitespace,
   estimateImageCount,
   sha8,
+  ANTHROPIC_PIXELS_PER_TOKEN,
+  IMAGE_COST_SAFETY_MARGIN,
   type TransformInfo,
   type TransformOptions,
 } from './transform.js';
@@ -100,6 +102,36 @@ export function openAIVisionTokens(model: string, w: number, h: number): number 
   if (Math.max(W, H) > 2048) { const r = 2048 / Math.max(W, H); W = Math.floor(W * r); H = Math.floor(H * r); }
   if (Math.min(W, H) > 768) { const r = 768 / Math.min(W, H); W = Math.floor(W * r); H = Math.floor(H * r); }
   return c.base + c.perTile * (Math.ceil(W / 512) * Math.ceil(H / 512));
+}
+
+/** True when this Responses/Chat request is actually served by a Claude model.
+ *  Codex-style clients speak OpenAI Responses while some models are Anthropic.
+ *  Cost math must then price images and cache the Anthropic way, not the GPT way. */
+export function isClaudeModel(model: string | null | undefined): boolean {
+  const m = (model ?? '').toLowerCase();
+  return m.startsWith('claude') || m.includes('anthropic');
+}
+
+export function isGrokModel(model: string | null | undefined): boolean {
+  return (model ?? '').toLowerCase().startsWith('grok-');
+}
+
+/** Measured 2026-07-09 on grok-4.5: image-token delta ≈ 1000 per megapixel
+ *  across several page sizes (768x336 → 268, 764x980 → 748, etc.). */
+export const GROK_TOKENS_PER_MEGAPIXEL = 1000;
+
+/** Per-image vision-token cost for the model actually serving the request.
+ *  Claude: Anthropic pixel formula. Grok: measured tok/MPix. GPT/o-series:
+ *  OpenAI tile/patch formula. Model-based, not endpoint-based. */
+export function visionTokensForModel(model: string, w: number, h: number): number {
+  if (isClaudeModel(model)) {
+    return Math.ceil((w * h / ANTHROPIC_PIXELS_PER_TOKEN) * IMAGE_COST_SAFETY_MARGIN);
+  }
+  if (isGrokModel(model)) {
+    const pixels = Math.max(0, w) * Math.max(0, h);
+    return Math.max(1, Math.ceil((pixels / 1_000_000) * GROK_TOKENS_PER_MEGAPIXEL));
+  }
+  return openAIVisionTokens(model, w, h);
 }
 
 type OpenAIRole = 'system' | 'developer' | 'user' | 'assistant' | 'tool' | string;
@@ -472,7 +504,7 @@ function evalOpenAIGate(
 ): { imageTokens: number; textTokens: number; profitable: boolean } {
   const stripW = 2 * PAD_X + cols * CELL_W;
   const estImages = estimateImageCount(renderedText, cols, 1);
-  const perStrip = openAIVisionTokens(model, stripW, resolveGptProfile(model).maxHeightPx);
+  const perStrip = visionTokensForModel(model, stripW, resolveGptProfile(model).maxHeightPx);
   const imageTokens = estImages * perStrip;
   const textTokens = renderedText.length / charsPerToken;
   return { imageTokens, textTokens, profitable: imageTokens < textTokens };
@@ -509,9 +541,24 @@ function gptTextTokens(text: string): number {
 
 /** Vision-token cost of the rendered images, summed over their real dims —
  *  what GPT actually bills as input for the slab pxpipe imaged. */
+function profileRenderStyle(
+  model: string | null | undefined,
+): { cellWBonus?: number; cellHBonus?: number; aa?: boolean; grid?: boolean; colorCycle?: boolean } {
+  const st = resolveGptProfile(model).style as
+    | { cellWBonus?: number; cellHBonus?: number; aa?: boolean; grid?: boolean; colorCycle?: boolean }
+    | undefined;
+  return {
+    cellWBonus: st?.cellWBonus ?? 0,
+    cellHBonus: st?.cellHBonus ?? 0,
+    aa: st?.aa ?? true,
+    ...(st?.grid ? { grid: true } : {}),
+    ...(st?.colorCycle ? { colorCycle: true } : {}),
+  };
+}
+
 function gptImageTokens(model: string, images: RenderedImage[]): number {
   let n = 0;
-  for (const img of images) n += openAIVisionTokens(model, img.width, img.height);
+  for (const img of images) n += visionTokensForModel(model, img.width, img.height);
   return n;
 }
 
@@ -675,7 +722,7 @@ export async function transformOpenAIChatCompletions(
     return { body, info };
   }
 
-  const images = await renderTextToPngs(renderedText, cols, {}, resolveGptProfile(req.model).maxHeightPx);
+  const images = await renderTextToPngs(renderedText, cols, profileRenderStyle(req.model), resolveGptProfile(req.model).maxHeightPx);
   if (images.length === 0) {
     info.reason = 'render_empty';
     return { body, info };
@@ -737,6 +784,7 @@ export async function transformOpenAIChatCompletions(
       reflow: o.reflow,
       cols: o.gptHistory?.cols ?? resolveGptProfile(req.model).stripCols,
       maxHeightPx: o.gptHistory?.maxHeightPx ?? resolveGptProfile(req.model).maxHeightPx,
+      style: o.gptHistory?.style ?? profileRenderStyle(req.model),
     });
     foldGptHistory(info, req.model, plan);
     const allImages = [...plan.images, ...plan.imagesAfter];
@@ -882,7 +930,7 @@ export async function transformOpenAIResponses(
     return { body, info };
   }
 
-  const images = await renderTextToPngs(renderedText, cols, {}, resolveGptProfile(req.model).maxHeightPx);
+  const images = await renderTextToPngs(renderedText, cols, profileRenderStyle(req.model), resolveGptProfile(req.model).maxHeightPx);
   if (images.length === 0) {
     info.reason = 'render_empty';
     return { body, info };
@@ -975,6 +1023,7 @@ export async function transformOpenAIResponses(
       reflow: o.reflow,
       cols: o.gptHistory?.cols ?? resolveGptProfile(req.model).stripCols,
       maxHeightPx: o.gptHistory?.maxHeightPx ?? resolveGptProfile(req.model).maxHeightPx,
+      style: o.gptHistory?.style ?? profileRenderStyle(req.model),
     });
     foldGptHistory(info, req.model, plan);
     const allImages = [...plan.images, ...plan.imagesAfter];

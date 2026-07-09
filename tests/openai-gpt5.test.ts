@@ -4,7 +4,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { isPxpipeSupportedGptModel } from '../src/core/applicability.js';
-import { openAIVisionTokens, resolveVisionCost, transformOpenAIChatCompletions, transformOpenAIResponses } from '../src/core/openai.js';
+import { openAIVisionTokens, visionTokensForModel, isClaudeModel, resolveVisionCost, transformOpenAIChatCompletions, transformOpenAIResponses } from '../src/core/openai.js';
+import { resolveGptProfile } from '../src/core/gpt-model-profiles.js';
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -63,6 +64,25 @@ describe('openAIVisionTokens', () => {
     expect(resolveVisionCost('gpt-5.6-nano').regime).toBe('patch');
     expect(resolveVisionCost('gpt-4o').regime).toBe('tile');
     expect(resolveVisionCost('o1').regime).toBe('tile');
+  });
+});
+
+describe('visionTokensForModel (Claude on the Responses path)', () => {
+  it('isClaudeModel detects claude/anthropic model ids', () => {
+    expect(isClaudeModel('claude-opus-4-8')).toBe(true);
+    expect(isClaudeModel('claude-sonnet-5')).toBe(true);
+    expect(isClaudeModel('anthropic/claude-3-5')).toBe(true);
+    expect(isClaudeModel('gpt-5.6')).toBe(false);
+    expect(isClaudeModel(undefined)).toBe(false);
+  });
+
+  it('prices claude images by pixel area, not GPT tiles', () => {
+    // Codex speaks OpenAI Responses; some models on that path are Claude, so
+    // this path must bill images the Anthropic way: ceil(w*h/750 * 1.10).
+    // 768x1932 → ceil(768*1932/750 * 1.10) = ceil(2176.8) = 2177.
+    expect(visionTokensForModel('claude-opus-4-8', 768, 1932)).toBe(2177);
+    // GPT models are unchanged (delegates to openAIVisionTokens).
+    expect(visionTokensForModel('gpt-5', 768, 1932)).toBe(openAIVisionTokens('gpt-5', 768, 1932));
   });
 });
 
@@ -767,3 +787,45 @@ describe('image parts request detail = "original" (avoid downscale of dense text
     for (const p of imgs) expect(p.detail).toBe('original');
   });
 });
+
+
+describe('resolveGptProfile (Claude on Responses)', () => {
+  it('uses Anthropic geometry by model id, not the GPT Responses defaults', () => {
+    // Several families share /v1/responses. Claude must not inherit GPT's
+    // 152-col / 1932 px profile: Anthropic dense pages are 312 cols × 728 px.
+    // Wrong geometry overstates image tokens and leaves As text / Saved blank.
+    const p = resolveGptProfile('claude-opus-4-8');
+    expect(p.maxHeightPx).toBe(728);
+    expect(p.stripCols).toBe(312);
+    expect(resolveGptProfile('claude-fable-5').maxHeightPx).toBe(728);
+    expect(resolveGptProfile('claude-fable-5').stripCols).toBe(312);
+    expect(resolveGptProfile('gpt-5.6').maxHeightPx).toBe(1932);
+    expect(resolveGptProfile('gpt-5.6').stripCols).toBe(152);
+  });
+});
+
+describe('resolveGptProfile (Grok)', () => {
+  it('uses production 5x8 packing; exact IDs ride the fact-sheet, not cell padding', () => {
+    // Dense packing maximizes measured Grok savings (~1000 tok/MPix). Exact
+    // tokens (paths/hex/ports/camelCase) are kept as text beside the image.
+    const p = resolveGptProfile('grok-4.5');
+    expect(p.stripCols).toBe(152);
+    expect(p.style?.cellWBonus).toBe(0);
+    expect(p.style?.cellHBonus).toBe(0);
+    expect(p.style?.aa).toBe(true);
+    expect(resolveGptProfile('grok-4').stripCols).toBe(152);
+  });
+});
+
+describe('visionTokensForModel (Grok)', () => {
+  it('prices Grok images by measured megapixel rate, not GPT tiles', () => {
+    // ceil(w*h/1e6 * 1000)
+    expect(visionTokensForModel('grok-4.5', 768, 336)).toBe(Math.ceil((768 * 336) / 1000));
+    expect(visionTokensForModel('grok-4.5', 764, 980)).toBe(Math.ceil((764 * 980) / 1000));
+    // Must not use GPT tile pricing (would be much larger for tall pages).
+    expect(visionTokensForModel('grok-4.5', 764, 980)).toBeLessThan(
+      openAIVisionTokens('gpt-4o', 764, 980),
+    );
+  });
+});
+

@@ -27,6 +27,10 @@ const PATTERNS: readonly RegExp[] = [
   /\b\d[\d,_]{3,}\b/g, // large / separated number
   /\b\d+\.\d+\b/g, // decimal
   /\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)+\b/g, // CONST_IDS / env var names
+  // camelCase / PascalCase with ≥1 lowercase run and ≥1 internal capital
+  // (tokenLedgerShard, getUserById). Rejects ALL-CAPS words so history markers
+  // like CURRENT/FRONTIER do not flood the sheet.
+  /\b(?:[a-z]+|[A-Z][a-z0-9]+)(?:[A-Z][a-z0-9]*)+\b/g,
   // Ticket/advisory-style codes: uppercase hyphenated with ≥1 digit (PROJ-1482,
   // CVE-2024-30078, AUDIT-ZX9). Digit lookahead is bounded → no backtracking blowup.
   /\b(?=[A-Z0-9-]{0,119}\d)[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+\b/g,
@@ -55,6 +59,7 @@ const SHAPE_TICKET = /^(?=[A-Z0-9-]*\d)[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+$/; // PROJ-
 const SHAPE_FLAG = /^--?[A-Za-z][\w-]+$/; // CLI flag
 const SHAPE_NUM = /^\d[\d,_]*$|^\d+\.\d+$/; // port / large or separated number / decimal
 const SHAPE_URL = /^https?:\/\//;
+const SHAPE_CAMEL = /^(?:[a-z]+|[A-Z][a-z0-9]+)(?:[A-Z][a-z0-9]*)+$/; // tokenLedgerShard / getUserById
 
 /** Lower tier = higher keep-priority. Pure function of the token → deterministic. */
 function priorityTier(tok: string): 0 | 1 | 2 {
@@ -64,7 +69,8 @@ function priorityTier(tok: string): 0 | 1 | 2 {
     SHAPE_CONST.test(tok) ||
     SHAPE_TICKET.test(tok) ||
     SHAPE_FLAG.test(tok) ||
-    SHAPE_NUM.test(tok)
+    SHAPE_NUM.test(tok) ||
+    (SHAPE_CAMEL.test(tok) && tok.length >= 8)
   ) {
     return 0;
   }

@@ -24,12 +24,26 @@
  * (1190 / 1445 / 2372 / 1464 / 630 …) was calibrated at this height — do not re-link to
  * the Anthropic constant.
  */
+import {
+  MAX_HEIGHT_PX as ANTHROPIC_MAX_HEIGHT_PX,
+  DENSE_CONTENT_COLS as ANTHROPIC_STRIP_COLS,
+} from './render.js';
+
 export const GPT_MAX_HEIGHT_PX = 1932;
 
 /** Image-token cost model (mirrors OpenAI's mandatory pre-tokenize resize). */
 export type GptVisionCost =
   | { regime: 'tile'; base: number; perTile: number }
   | { regime: 'patch'; multiplier: number; patchCap: number };
+
+export interface GptRenderStyle {
+  /** Extra px beside the 5px glyph (cell width = 5 + this). */
+  cellWBonus?: number;
+  /** Extra px above the 8px glyph (cell height = 8 + this). */
+  cellHBonus?: number;
+  /** Grayscale AA atlas. Default true for production dense pages. */
+  aa?: boolean;
+}
 
 export interface GptModelProfile {
   /** How OpenAI bills the rendered images as input tokens. */
@@ -40,6 +54,10 @@ export interface GptModelProfile {
   /** Max rendered image height in px. Threaded into the renderer so the gate's
    *  cost estimate and the actual page split agree. */
   maxHeightPx: number;
+  /** Glyph density / spacing. Omitted fields fall through to renderer defaults
+   *  (production 5x8: cellWBonus=0, cellHBonus=0, aa=true). Models that confabulate
+   *  exact strings at production density set larger bonuses here. */
+  style?: GptRenderStyle;
 }
 
 /** Default downscale-safe strip width (768px). Exported as the global cols default. */
@@ -56,6 +74,7 @@ export const DEFAULT_GPT_PROFILE: GptModelProfile = {
   vision: { regime: 'tile', base: 85, perTile: 170 },
   stripCols: C,
   maxHeightPx: H,
+  style: { cellWBonus: 0, cellHBonus: 0, aa: true },
 };
 
 interface ProfileRule {
@@ -104,6 +123,41 @@ const BUILTIN_RULES: ProfileRule[] = [
     test: (m) => /^o[13]/.test(m),
     profile: { vision: { regime: 'tile', base: 75, perTile: 150 }, stripCols: C, maxHeightPx: H },
   },
+
+  // Claude on the Responses path (Codex-style clients). Selection is by model
+  // id, not endpoint: several families share /v1/responses. Anthropic geometry
+  // (dense 312-col strips, 728 px height) and pixel billing differ from GPT's
+  // 152-col / 1932 px profile. Using the GPT defaults overstates image cost and
+  // flips the slab gate to not_profitable, so an enabled Claude model stays
+  // text-only and the dashboard leaves As text / Saved blank.
+  {
+    test: (m) => m.startsWith('claude') || m.includes('anthropic'),
+    profile: {
+      // Vision struct unused: visionTokensForModel prices Claude by pixels.
+      vision: { regime: 'tile', base: 85, perTile: 170 },
+      stripCols: ANTHROPIC_STRIP_COLS,
+      maxHeightPx: ANTHROPIC_MAX_HEIGHT_PX,
+      style: { cellWBonus: 0, cellHBonus: 0, aa: true },
+    },
+  },
+
+  // Grok (Responses path). Production 5x8 packing maximizes pixel savings
+  // (measured ~1000 image tok/MPix). Exact-ID OCR is weak at that density, so
+  // the Responses transform keeps a verbatim fact-sheet of paths/hex/ports/
+  // camelCase ids next to the image (see factsheet.ts). Do NOT inflate cell
+  // bonuses here just to pass OCR tests — that trades away the savings.
+  {
+    test: (m) => /^grok-/.test(m),
+    profile: {
+      // Vision numbers here are unused for Grok: visionTokensForModel uses the
+      // measured pixel model. Keep a conservative tile placeholder for tools
+      // that only read the profile struct.
+      vision: { regime: 'tile', base: 85, perTile: 170 },
+      stripCols: C,
+      maxHeightPx: H,
+      style: { cellWBonus: 0, cellHBonus: 0, aa: true },
+    },
+  },
 ];
 
 function resolveBuiltin(m: string): GptModelProfile {
@@ -145,10 +199,22 @@ function parseEnvProfiles(raw: string): Map<string, GptModelProfile> {
     const key = k.toLowerCase();
     const base = resolveBuiltin(key); // partial fields fall back to the built-in match
     const p = v as Partial<GptModelProfile>;
+    const styleIn = (p as { style?: GptRenderStyle }).style;
+    const baseStyle = base.style ?? { cellWBonus: 0, cellHBonus: 0, aa: true };
+    const style: GptRenderStyle = {
+      cellWBonus: styleIn && Number.isFinite(styleIn.cellWBonus as number)
+        ? Math.floor(styleIn.cellWBonus as number)
+        : baseStyle.cellWBonus,
+      cellHBonus: styleIn && Number.isFinite(styleIn.cellHBonus as number)
+        ? Math.floor(styleIn.cellHBonus as number)
+        : baseStyle.cellHBonus,
+      aa: styleIn && typeof styleIn.aa === 'boolean' ? styleIn.aa : baseStyle.aa,
+    };
     out.set(key, {
       vision: isValidVision(p.vision) ? p.vision : base.vision,
       stripCols: posInt(p.stripCols, base.stripCols),
       maxHeightPx: posInt(p.maxHeightPx, base.maxHeightPx),
+      style,
     });
   }
   return out;
@@ -168,6 +234,19 @@ function envProfiles(): Map<string, GptModelProfile> {
  * (longest matching prefix) win over the built-in table; unknown models get the
  * conservative `DEFAULT_GPT_PROFILE`.
  */
+function withDefaultStyle(profile: GptModelProfile): GptModelProfile {
+  const d = DEFAULT_GPT_PROFILE.style!;
+  const st = profile.style;
+  return {
+    ...profile,
+    style: {
+      cellWBonus: st?.cellWBonus ?? d.cellWBonus,
+      cellHBonus: st?.cellHBonus ?? d.cellHBonus,
+      aa: st?.aa ?? d.aa,
+    },
+  };
+}
+
 export function resolveGptProfile(model: string | null | undefined): GptModelProfile {
   const m = (model ?? '').toLowerCase();
   const env = envProfiles();
@@ -180,7 +259,7 @@ export function resolveGptProfile(model: string | null | undefined): GptModelPro
         bestLen = k.length;
       }
     }
-    if (best) return best;
+    if (best) return withDefaultStyle(best);
   }
-  return resolveBuiltin(m);
+  return withDefaultStyle(resolveBuiltin(m));
 }

@@ -106,6 +106,27 @@ describe('public library API', () => {
     expect(isPxpipeSupportedGptModel(null)).toBe(false);
   });
 
+  it('keeps Grok opt-in only (off by default, like Opus)', () => {
+    // Pure-image exact OCR fails at production 5×8; do not image Grok unless
+    // the operator opts in via PXPIPE_MODELS or the dashboard chip.
+    const prev = process.env.PXPIPE_MODELS;
+    try {
+      delete process.env.PXPIPE_MODELS;
+      expect(isPxpipeSupportedGptModel('grok-4.5')).toBe(false);
+      expect(isPxpipeSupportedGptModel('grok-4')).toBe(false);
+      expect(isPxpipeSupportedGptModel('grok-4.20')).toBe(false);
+      expect(getAllowedModelBases()).not.toContain('grok-4.5');
+      expect(getAllowedModelBases()).toEqual(['claude-fable-5', 'gpt-5.6']);
+
+      process.env.PXPIPE_MODELS = 'claude-fable-5,gpt-5.6,grok-4.5';
+      expect(isPxpipeSupportedGptModel('grok-4.5')).toBe(true);
+      expect(isPxpipeSupportedGptModel('grok-4.5-fast')).toBe(true); // -suffix alias
+    } finally {
+      if (prev === undefined) delete process.env.PXPIPE_MODELS;
+      else process.env.PXPIPE_MODELS = prev;
+    }
+  });
+
   it('honors the single PXPIPE_MODELS scope for GPT families', () => {
     const prev = process.env.PXPIPE_MODELS;
     try {

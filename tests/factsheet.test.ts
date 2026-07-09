@@ -119,4 +119,34 @@ describe('ticket-style codes and occurrence counts', () => {
     expect(hit).toBeDefined();
     expect(hit!.count).toBe(5);
   });
+
+  it('keeps camelCase identifiers that models confabulate off dense images', () => {
+    const sheet = factSheetText('renamed the field to tokenLedgerShard and port 47821');
+    expect(sheet).toContain('tokenLedgerShard');
+    expect(sheet).toContain('47821');
+  });
+
+
+  it('covers the Grok density-harness probes (hex/camel/path/port)', () => {
+    // Production Grok keeps 5x8 images and relies on the fact-sheet for exact
+    // IDs. If extraction drops any of these shapes, image-only confab returns.
+    const text = [
+      'token cache key is a3f9c1e0b7d2',
+      'renamed the field to tokenLedgerShard',
+      'moved the tier math into src/core/anthropic-vision.ts',
+      'Proxy stays on port 47821',
+      'CLI takes --max-visual-tokens',
+    ].join('. ');
+    const toks = extractFactSheetTokens(text);
+    for (const need of [
+      'a3f9c1e0b7d2',
+      'tokenLedgerShard',
+      'src/core/anthropic-vision.ts',
+      '47821',
+      '--max-visual-tokens',
+    ]) {
+      expect(toks, `missing ${need}`).toContain(need);
+    }
+  });
+
 });

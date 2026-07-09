@@ -89,6 +89,10 @@ const GPT_MODEL_CATALOG: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'gpt-5.5', label: 'GPT 5.5' },
 ];
 
+const GROK_MODEL_CATALOG: ReadonlyArray<{ id: string; label: string }> = [
+  { id: 'grok-4.5', label: 'Grok 4.5' },
+];
+
 export function renderModelsFragment(
   active: string[],
   configured: string[],
@@ -96,7 +100,7 @@ export function renderModelsFragment(
 ): string {
   const on = new Set(active);
   const labelOf = new Map(
-    [...MODEL_CATALOG, ...GPT_MODEL_CATALOG].map((m) => [m.id, m.label]),
+    [...MODEL_CATALOG, ...GPT_MODEL_CATALOG, ...GROK_MODEL_CATALOG].map((m) => [m.id, m.label]),
   );
   // Union the catalog with env-configured + active ids so PXPIPE_MODELS-enabled
   // families always show as toggles, then split by family for the two sections.
@@ -105,6 +109,7 @@ export function renderModelsFragment(
   for (const id of [
     ...MODEL_CATALOG.map((m) => m.id),
     ...GPT_MODEL_CATALOG.map((m) => m.id),
+    ...GROK_MODEL_CATALOG.map((m) => m.id),
     ...configured,
     ...active,
   ]) {
@@ -122,14 +127,25 @@ export function renderModelsFragment(
       `hx-vals='{"model":"${id}","on":${!lit}}'>${escapeHtml(label)}${lit ? ' ✓' : ''}</button>`
     );
   };
-  const claudeChips = ids.filter((id) => !id.startsWith('gpt')).map(chipFor).join('');
+  const claudeChips = ids.filter((id) => id.startsWith('claude')).map(chipFor).join('');
   const gptChips = ids.filter((id) => id.startsWith('gpt')).map(chipFor).join('');
+  const grokChips = ids.filter((id) => id.startsWith('grok')).map(chipFor).join('');
+  const otherChips = ids
+    .filter((id) => !id.startsWith('claude') && !id.startsWith('gpt') && !id.startsWith('grok'))
+    .map(chipFor)
+    .join('');
   const moot = enabled ? '' : ` <span class="hint">compression is off, so this has no effect right now</span>`;
   return (
     `<div class="models">` +
     `<span class="models-label">Image Claude models</span>` +
     claudeChips +
     `<span class="hint">everything else is sent as normal text · runtime only · persist with PXPIPE_MODELS</span>${moot}` +
+    `</div>` +
+    `<div class="models">` +
+    `<span class="models-label">Image Grok models</span>` +
+    grokChips +
+    otherChips +
+    `<span class="hint">opt-in only · OpenAI Responses path · set PXPIPE_MODELS to persist</span>${moot}` +
     `</div>` +
     `<div class="models" style="display:none">` +
     `<span class="models-label">Image GPT models</span>` +
