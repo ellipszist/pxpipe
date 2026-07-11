@@ -1,0 +1,161 @@
+{
+  "generatedAt": "2026-07-11T20:47:49.180Z",
+  "model": "grok-4.5",
+  "live": true,
+  "correct": 0,
+  "n": 15,
+  "rows": [
+    {
+      "page": 0,
+      "dur": 4439,
+      "gold": "c9c947f680ec",
+      "got": "",
+      "ok": false,
+      "raw": "c9c4176684",
+      "ms": 21274,
+      "error": null
+    },
+    {
+      "page": 0,
+      "dur": 812,
+      "gold": "851eb3af1bd1",
+      "got": "36efd6a5e76e",
+      "ok": false,
+      "raw": "36efd6a5e76e",
+      "ms": 2477,
+      "error": null
+    },
+    {
+      "page": 0,
+      "dur": 6150,
+      "gold": "ade34f70fd73",
+      "got": "",
+      "ok": false,
+      "raw": "non-json HTTP 503: <!DOCTYPE html>\n<!--[if lt IE 7]> <html class=\"no-js ie6 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if IE 7]>    <html class=\"no-js ie7 oldie\" lang=\"en-US\"> <![endi",
+      "ms": null,
+      "error": "non-json HTTP 503: <!DOCTYPE html>\n<!--[if lt IE 7]> <html class=\"no-js ie6 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if IE 7]>    <html class=\"no-js ie7 oldie\" lang=\"en-US\"> <![endi"
+    },
+    {
+      "page": 1,
+      "dur": 7978,
+      "gold": "c5d68855f46d",
+      "got": "",
+      "ok": false,
+      "raw": "This operation was aborted",
+      "ms": null,
+      "error": "This operation was aborted"
+    },
+    {
+      "page": 1,
+      "dur": 8071,
+      "gold": "92abade01aad",
+      "got": "",
+      "ok": false,
+      "raw": "This operation was aborted",
+      "ms": null,
+      "error": "This operation was aborted"
+    },
+    {
+      "page": 1,
+      "dur": 3309,
+      "gold": "ffe21785b09d",
+      "got": "",
+      "ok": false,
+      "raw": "This operation was aborted",
+      "ms": null,
+      "error": "This operation was aborted"
+    },
+    {
+      "page": 2,
+      "dur": 7215,
+      "gold": "87cb51eb0e99",
+      "got": "",
+      "ok": false,
+      "raw": "This operation was aborted",
+      "ms": null,
+      "error": "This operation was aborted"
+    },
+    {
+      "page": 2,
+      "dur": 4397,
+      "gold": "93c3ced96dac",
+      "got": "",
+      "ok": false,
+      "raw": "non-json HTTP 503: <!DOCTYPE html>\n<!--[if lt IE 7]> <html class=\"no-js ie6 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if IE 7]>    <html class=\"no-js ie7 oldie\" lang=\"en-US\"> <![endi",
+      "ms": null,
+      "error": "non-json HTTP 503: <!DOCTYPE html>\n<!--[if lt IE 7]> <html class=\"no-js ie6 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if IE 7]>    <html class=\"no-js ie7 oldie\" lang=\"en-US\"> <![endi"
+    },
+    {
+      "page": 2,
+      "dur": 4495,
+      "gold": "f152ae9bfb8f",
+      "got": "",
+      "ok": false,
+      "raw": "This operation was aborted",
+      "ms": null,
+      "error": "This operation was aborted"
+    },
+    {
+      "page": 3,
+      "dur": 1622,
+      "gold": "5a7373d4187f",
+      "got": "",
+      "ok": false,
+      "raw": "non-json HTTP 503: <!DOCTYPE html>\n<!--[if lt IE 7]> <html class=\"no-js ie6 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if IE 7]>    <html class=\"no-js ie7 oldie\" lang=\"en-US\"> <![endi",
+      "ms": null,
+      "error": "non-json HTTP 503: <!DOCTYPE html>\n<!--[if lt IE 7]> <html class=\"no-js ie6 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if IE 7]>    <html class=\"no-js ie7 oldie\" lang=\"en-US\"> <![endi"
+    },
+    {
+      "page": 3,
+      "dur": 2025,
+      "gold": "44ea8c7aeedd",
+      "got": "",
+      "ok": false,
+      "raw": "4eac37aedd",
+      "ms": 45790,
+      "error": null
+    },
+    {
+      "page": 3,
+      "dur": 6533,
+      "gold": "8145b5a0fd46",
+      "got": "",
+      "ok": false,
+      "raw": "This operation was aborted",
+      "ms": null,
+      "error": "This operation was aborted"
+    },
+    {
+      "page": 4,
+      "dur": 2921,
+      "gold": "b8fce698f971",
+      "got": "",
+      "ok": false,
+      "raw": "b0fce68f971",
+      "ms": 22070,
+      "error": null
+    },
+    {
+      "page": 4,
+      "dur": 8475,
+      "gold": "4a8164556b99",
+      "got": "",
+      "ok": false,
+      "raw": "a816655b0a",
+      "ms": 29812,
+      "error": null
+    },
+    {
+      "page": 4,
+      "dur": 8799,
+      "gold": "e53112c4b5a4",
+      "got": "",
+      "ok": false,
+      "raw": "a316a558ba",
+      "ms": 30782,
+      "error": null
+    }
+  ],
+  "completed": 6,
+  "errors": 9
+}

@@ -89,7 +89,6 @@ GROK_DENSITY_LIVE=1 node eval/grok-density/factsheet-vs-image.mjs
 
 See [FACTSHEET_RESULTS.md](./FACTSHEET_RESULTS.md).
 
-Pure-image 5×8 retune: [FIVE_BY_EIGHT_PURE_RESULTS.md](./FIVE_BY_EIGHT_PURE_RESULTS.md).
 
 ## Full quality suite (Codex path)
 
