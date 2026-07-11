@@ -17,6 +17,7 @@
 /** ReDoS-safe extraction patterns (each global). Ordered most- to least-specific so the
  *  longest, most-identifying tokens are kept first when the substring filter runs. */
 const PATTERNS: readonly RegExp[] = [
+  /\b[A-Z][A-Z0-9_]{2,}=[^\s)"'<>]+/g, // semantic LABEL=value pair (preserve association)
   /\bhttps?:\/\/[^\s)"'<>]+/g, // URLs
   /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, // UUID
   /(?:[\w@~+-]+)?(?:\/[\w.@+-]+)+\.[A-Za-z]\w{0,8}\b/g, // path with a file extension (multi-dot ok: .test.ts)
@@ -62,10 +63,12 @@ const SHAPE_FLAG = /^--?[A-Za-z][\w-]+$/; // CLI flag
 const SHAPE_NUM = /^\d[\d,_]*$|^\d+\.\d+$/; // port / large or separated number / decimal
 const SHAPE_URL = /^https?:\/\//;
 const SHAPE_CAMEL = /^(?:[a-z]+|[A-Z][a-z0-9]+)(?:[A-Z][a-z0-9]*)+$/; // tokenLedgerShard / getUserById
+const SHAPE_ASSIGNMENT = /^[A-Z][A-Z0-9_]{2,}=\S+$/; // ACTIVE_MANIFEST=/path
 
 /** Lower tier = higher keep-priority. Pure function of the token → deterministic. */
 function priorityTier(tok: string): 0 | 1 | 2 {
   if (
+    SHAPE_ASSIGNMENT.test(tok) ||
     SHAPE_HEX.test(tok) ||
     SHAPE_UUID.test(tok) ||
     SHAPE_CONST.test(tok) ||
