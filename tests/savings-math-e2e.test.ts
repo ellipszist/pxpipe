@@ -160,12 +160,9 @@ describe('savings math — GPT, cross-checked against the real o200k tokenizer',
   });
 
   it('DECLINES A LOSER: refuses to image content where imaging would cost more than the real text', async () => {
-    // Dense long-line slab: few o200k text tokens relative to vision pages.
-    // Use enough low-token-density alphabet runs to remain a loser under the denser
-    // Sol 5×8 packing; the gate must still reject it.
-    const sys = Array.from({ length: 80 }, (_, i) =>
-      `LINE${i} ` + 'abcdefghijklmnopqrstuvwxyz'.repeat(40),
-    ).join('\n');
+    // Long interior whitespace survives render minification and consumes cells,
+    // but o200k represents each run with very few tokens.
+    const sys = Array.from({ length: 1_000 }, () => `a${' '.repeat(100)}b`).join('');
     const realTok = o200k(sys);
     const body = JSON.stringify({
       model: 'gpt-5.6-sol',

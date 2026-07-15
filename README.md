@@ -122,8 +122,9 @@ are imaged.
 
 ### Model quality (does the model read the images?)
 
-Every model row below uses the same production recipe unless a pure-image
-research arm is called out: **5×8 Spleen + IDS block + adjacent text factsheet**.
+Every model row below uses the model's production profile unless a pure-image
+research arm is called out. Sol uses **5×8 Spleen + adjacent text factsheet**;
+the rejected RGB-overprint research remains documented under `eval/sol-profile`.
 Claude numbers are novel problems the model cannot have memorized. Sol and Grok
 quality use Codex’s Responses provider; Fable/Opus use Claude. Token deltas
 compare matched input arms: negative saves tokens; positive costs more. The

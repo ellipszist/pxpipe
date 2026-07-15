@@ -3,6 +3,19 @@ import { toTrackEvent, JsonLogTracker, noopTracker, type TrackEvent } from '../s
 import type { ProxyEvent } from '../src/core/proxy.js';
 
 describe('toTrackEvent', () => {
+  it('persists bridged accounting semantics and GPT-native overhead', () => {
+    const out = toTrackEvent({
+      method: 'POST', path: '/v1/messages', model: 'gpt-5.6-sol',
+      accountingProvider: 'openai', status: 200, durationMs: 1,
+      info: {
+        compressed: true, origChars: 1, compressedChars: 1, imageCount: 1,
+        imageBytes: 1, staticChars: 1, dynamicChars: 0, dynamicBlockCount: 0,
+        nativeInjectedTokens: 123,
+      },
+    });
+    expect(out.accounting_provider).toBe('openai');
+    expect(out.native_injected_tokens).toBe(123);
+  });
   it('flattens ProxyEvent + TransformInfo + Usage into a single record', () => {
     const ev: ProxyEvent = {
       method: 'POST',

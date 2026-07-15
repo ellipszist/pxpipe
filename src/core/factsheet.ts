@@ -225,6 +225,10 @@ const OPEN =
  *  model can answer tally questions from the sheet instead of counting glyph rows. */
 const OPEN_COUNTS =
   '[Exact identifiers from the rendered context above (paths, ids, versions, numbers) — quote these verbatim instead of transcribing them from the image; ×N marks a token that occurs N times within the imaged content: ';
+const OPEN_COMPACT = '[Exact rendered identifiers—quote verbatim: ';
+const OPEN_COMPACT_COUNTS = '[Exact rendered identifiers—quote verbatim; ×N=count: ';
+
+export type FactSheetFormat = 'full' | 'compact';
 
 /** Build the one-line fact-sheet string from a pre-extracted token list. */
 export function factSheetTextFromTokens(tokens: string[]): string {
@@ -233,21 +237,27 @@ export function factSheetTextFromTokens(tokens: string[]): string {
 
 /** Build the one-line fact-sheet string from token+count entries. Byte-identical to
  *  `factSheetTextFromTokens` when no token repeats, so existing sheets stay cache-stable. */
-export function factSheetTextFromEntries(entries: readonly FactSheetEntry[]): string {
+export function factSheetTextFromEntries(
+  entries: readonly FactSheetEntry[],
+  format: FactSheetFormat = 'full',
+): string {
   if (entries.length === 0) return '';
   const anyRepeat = entries.some((e) => e.count >= 2);
   const body = entries.map((e) => (e.count >= 2 ? `${e.token} ×${e.count}` : e.token)).join(' · ');
-  return (anyRepeat ? OPEN_COUNTS : OPEN) + body + ']';
+  const opener = format === 'compact'
+    ? (anyRepeat ? OPEN_COMPACT_COUNTS : OPEN_COMPACT)
+    : (anyRepeat ? OPEN_COUNTS : OPEN);
+  return opener + body + ']';
 }
 
 /** One-line fact-sheet string for `text`, or `''` when nothing notable was found.
  *  Single path for slab, history, and tool results: page long text so early-turn
  *  ids are not dropped by MAX_SCAN. Short text is one page (same as before). */
-export function factSheetText(text: string): string {
+export function factSheetText(text: string, format: FactSheetFormat = 'full'): string {
   if (!text) return '';
   if (text.length <= MAX_SCAN) {
-    return factSheetTextFromEntries(extractFactSheetEntries(text));
+    return factSheetTextFromEntries(extractFactSheetEntries(text), format);
   }
   const { kept } = extractFactSheetEntriesAllPages(text, FACTSHEET_PAGE_CHARS);
-  return factSheetTextFromEntries(kept);
+  return factSheetTextFromEntries(kept, format);
 }

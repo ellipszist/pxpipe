@@ -49,7 +49,11 @@ const GPT_HISTORY_MAX_IMAGES = 32;
 /** Break-even gate predicate, injected to avoid a circular import with openai.ts.
  *  Receives the full string (not length) so the renderer's row-aware image-count
  *  estimate sees real newlines — history text is newline-heavy. */
-export type GptProfitableFn = (text: string, cols: number) => boolean;
+export type GptProfitableFn = (
+  text: string,
+  cols: number,
+  baselineTextTokens?: number,
+) => boolean;
 
 export interface GptHistoryOptions {
   /** Trailing items kept as live text (never collapsed). */
@@ -59,6 +63,9 @@ export interface GptHistoryOptions {
   /** Responses only: newest completed function-call/output pairs kept native.
    *  Open calls and malformed/orphan items are always native regardless of this value. */
   keepRecentPairs: number;
+  /** Responses selection policy. `pairs` preserves legacy call/output-only behavior;
+   *  `mixed` also images safe old user/assistant messages between protocol barriers. */
+  responsesMode: 'pairs' | 'mixed';
   /** Minimum collapsible items in [protectedPrefix..boundary]; below this the
    *  cache-amortization math doesn't pay (imaging a tiny prefix is net cost). */
   minCollapsePrefix: number;
@@ -107,6 +114,7 @@ export interface GptHistoryOptions {
 export const GPT_HISTORY_DEFAULTS: GptHistoryOptions = {
   keepTail: 6,
   keepRecentPairs: 6,
+  responsesMode: 'pairs',
   minCollapsePrefix: 10,
   minCollapseTokens: 2000,
   cols: GPT_HISTORY_COLS,
@@ -167,6 +175,8 @@ export interface ResponsesPairCollapseSegment {
   images: RenderedImage[];
   imageSources: string[];
   text: string;
+  /** Original native-content token value represented by this rendered segment. */
+  baselineTokens?: number;
 }
 
 export interface ResponsesPairCollapsePlan extends GptCollapsePlan {
@@ -192,6 +202,8 @@ export interface GptCollapsePlan {
   pinText?: string;
   /** The collapsed transcript text that was rendered (for o200k token counting). */
   text: string;
+  /** Original native-content token value when rendered framing adds synthetic text. */
+  baselineTokens?: number;
   /** Inclusive start index into the original item array. */
   start: number;
   /** Exclusive end index. Caller splices [start, endExclusive) → one synthetic item. */
@@ -542,6 +554,56 @@ function responseCallId(item: unknown): string {
   return o && typeof o.call_id === 'string' ? o.call_id : '';
 }
 
+interface ResponsesMessageText {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+/** Return a lossless textual Responses message, or null when the item carries
+ * non-text content that must stay native (images, unknown parts, empty state). */
+function responseMessageText(item: unknown): ResponsesMessageText | null {
+  const o = item as Record<string, unknown> | null;
+  if (!o || (o.role !== 'user' && o.role !== 'assistant')) return null;
+  const itemType = typeof o.type === 'string' ? o.type : '';
+  if (itemType && itemType !== 'message') return null;
+  let body = '';
+  if (typeof o.content === 'string') {
+    body = o.content;
+  } else if (Array.isArray(o.content)) {
+    const parts: string[] = [];
+    for (const part of o.content) {
+      const p = part as Record<string, unknown> | null;
+      const type = p && typeof p.type === 'string' ? p.type : '';
+      if (!p || !['input_text', 'output_text', 'text'].includes(type) || typeof p.text !== 'string') {
+        return null;
+      }
+      parts.push(p.text);
+    }
+    body = parts.join('\n\n');
+  } else {
+    return null;
+  }
+  if (!body.trim()) return null;
+  return { role: o.role, text: body };
+}
+
+function responseMessageTranscript(item: unknown, index: number): string | null {
+  const msg = responseMessageText(item);
+  return msg ? `<${msg.role} t="${index}">\n${msg.text}\n</${msg.role}>` : null;
+}
+
+function responseReferencedIds(items: unknown[]): Set<string> {
+  const refs = new Set<string>();
+  for (const item of items) {
+    const o = item as Record<string, unknown> | null;
+    if (!o || o.type !== 'item_reference') continue;
+    for (const key of ['id', 'item_id', 'ref_id']) {
+      if (typeof o[key] === 'string' && o[key]) refs.add(o[key] as string);
+    }
+  }
+  return refs;
+}
+
 /** Classify Responses tool state without interpreting recency from raw item count.
  * Only an unambiguous adjacent call/output pair is collapsible. Native items
  * between the call and output would be reordered by a single image replacement. */
@@ -626,6 +688,174 @@ function emptyResponsesPairPlan(state: ResponsesPairState): ResponsesPairCollaps
   };
 }
 
+interface ResponsesMixedUnit {
+  indices: number[];
+  text: string;
+  baselineTokens: number;
+}
+
+/** Profile-gated broad Responses planner. Safe textual messages and complete old
+ * call/output pairs may share one image group only when they are contiguous.
+ * Every other item is a hard barrier, preserving native protocol order/state. */
+async function planResponsesMixedCollapse(
+  items: unknown[],
+  old: ResponsesCompletedPair[],
+  state: ResponsesPairState,
+  isProfitable: GptProfitableFn,
+  o: GptHistoryOptions,
+): Promise<ResponsesPairCollapsePlan> {
+  const base = emptyResponsesPairPlan(state);
+  const oldByCall = new Map(old.map((pair) => [pair.callIndex, pair]));
+  const messageIndices: number[] = [];
+  const referencedIds = responseReferencedIds(items);
+  let latestUserIndex = -1;
+  for (let i = 0; i < items.length; i++) {
+    const msg = responseMessageText(items[i]);
+    if (!msg) continue;
+    messageIndices.push(i);
+    if (msg.role === 'user') latestUserIndex = i;
+  }
+  const protectedMessages = new Set(
+    messageIndices.slice(-Math.max(0, Math.floor(o.keepTail))),
+  );
+  if (latestUserIndex >= 0) protectedMessages.add(latestUserIndex);
+
+  const runs: ResponsesMixedUnit[][] = [];
+  let current: ResponsesMixedUnit[] = [];
+  const flush = (): void => {
+    if (current.length > 0) runs.push(current);
+    current = [];
+  };
+  for (let i = 0; i < items.length; i++) {
+    const pair = oldByCall.get(i);
+    const pairCall = pair ? items[pair.callIndex] as Record<string, unknown> | null : null;
+    const pairOutput = pair ? items[pair.outputIndex] as Record<string, unknown> | null : null;
+    const pairReferenced = !!pair && [pairCall?.id, pairOutput?.id]
+      .some((id) => typeof id === 'string' && referencedIds.has(id));
+    if (pair && !pairReferenced) {
+      current.push({
+        indices: [pair.callIndex, pair.outputIndex],
+        text: pair.text,
+        baselineTokens: pair.callTokens + pair.outputTokens,
+      });
+      i = pair.outputIndex;
+      continue;
+    }
+    const item = items[i] as Record<string, unknown> | null;
+    const referenced = !!item && typeof item.id === 'string' && referencedIds.has(item.id);
+    const text = protectedMessages.has(i) || referenced ? null : responseMessageTranscript(items[i], i);
+    if (text) {
+      current.push({
+        indices: [i],
+        text,
+        baselineTokens: gptCountTokens(responseMessageText(items[i])!.text),
+      });
+      continue;
+    }
+    flush();
+  }
+  flush();
+
+  const eligible = runs.flat();
+  const allText = eligible.map((unit) => unit.text).join('\n\n');
+  const allBaselineTokens = eligible.reduce((sum, unit) => sum + unit.baselineTokens, 0);
+  if (eligible.length === 0) return { ...base, reason: 'no_closed_prefix' };
+  if (allBaselineTokens < o.minCollapseTokens) {
+    return { ...base, reason: 'below_min_tokens', collapsedChars: allText.length };
+  }
+  const maxImages = Math.max(0, Math.floor(o.maxImages));
+  if (maxImages === 0) {
+    return { ...base, reason: 'too_many_images', collapsedChars: allText.length };
+  }
+
+  const renderUnits = async (units: ResponsesMixedUnit[]) => {
+    const source = units.map((unit) => unit.text).join('\n\n');
+    const safe = neutralizeSentinel(source);
+    const renderedText = o.reflow ? reflow(safe) ?? safe : safe;
+    const images = await renderTextToPngs(renderedText, o.cols, o.style ?? {}, o.maxHeightPx);
+    return { source, renderedText, images };
+  };
+
+  const segments: ResponsesPairCollapseSegment[] = [];
+  let remainingImages = maxImages;
+  let hitImageCap = false;
+  for (const run of runs) {
+    if (remainingImages === 0) { hitImageCap = true; break; }
+    let low = 0;
+    let high = run.length + 1;
+    let best: Awaited<ReturnType<typeof renderUnits>> | undefined;
+    while (low + 1 < high) {
+      const count = Math.floor((low + high) / 2);
+      const rendered = await renderUnits(run.slice(0, count));
+      if (rendered.images.length > 0 && rendered.images.length <= remainingImages) {
+        low = count;
+        best = rendered;
+      } else {
+        high = count;
+      }
+    }
+    if (!best || low === 0) { hitImageCap = true; break; }
+    const selected = run.slice(0, low);
+    const selectedBaselineTokens = selected.reduce((sum, unit) => sum + unit.baselineTokens, 0);
+    if (!isProfitable(best.renderedText, o.cols, selectedBaselineTokens)) continue;
+    const selectedIndices = selected.flatMap((unit) => unit.indices).sort((a, b) => a - b);
+    segments.push({
+      insertAt: selectedIndices[0]!,
+      selectedIndices,
+      images: best.images,
+      imageSources: best.images.map(() => best.source),
+      text: best.source,
+      baselineTokens: selectedBaselineTokens,
+    });
+    remainingImages -= best.images.length;
+    if (low < run.length) { hitImageCap = true; break; }
+  }
+
+  if (segments.length === 0) {
+    return {
+      ...base,
+      reason: hitImageCap ? 'too_many_images' : 'not_profitable',
+      collapsedChars: allText.length,
+    };
+  }
+  const selectedIndices = segments.flatMap((segment) => segment.selectedIndices).sort((a, b) => a - b);
+  const selectedIds = new Set(selectedIndices);
+  const selectedPairs = old.filter(
+    (pair) => selectedIds.has(pair.callIndex) && selectedIds.has(pair.outputIndex),
+  );
+  state.collapsedPairs = selectedPairs.length;
+  state.collapsedFunctionCallTokens = selectedPairs.reduce((n, pair) => n + pair.callTokens, 0);
+  state.collapsedFunctionOutputTokens = selectedPairs.reduce((n, pair) => n + pair.outputTokens, 0);
+  const images = segments.flatMap((segment) => segment.images);
+  const imageSources = segments.flatMap((segment) => segment.imageSources);
+  const text = segments.map((segment) => segment.text).join('\n\n');
+  const baselineTokens = segments.reduce((sum, segment) => sum + (segment.baselineTokens ?? 0), 0);
+  const droppedCodepoints = new Map<number, number>();
+  let droppedChars = 0;
+  for (const image of images) {
+    droppedChars += image.droppedChars;
+    for (const [codepoint, count] of image.droppedCodepoints) {
+      droppedCodepoints.set(codepoint, (droppedCodepoints.get(codepoint) ?? 0) + count);
+    }
+  }
+  return {
+    ...base,
+    segments,
+    images,
+    imageSources,
+    text,
+    baselineTokens,
+    start: selectedIndices[0] ?? 0,
+    endExclusive: (selectedIndices.at(-1) ?? -1) + 1,
+    collapsedTurns: selectedIndices.length,
+    collapsedChars: text.length,
+    droppedChars,
+    droppedCodepoints,
+    selectedIndices,
+    pairState: state,
+  };
+}
+
 /** Render only old, unambiguously completed Responses call/output pairs.
  * Native messages, reasoning, recent pairs, open calls, and malformed state stay
  * in place. Consecutive pairs may share pages, but no segment crosses native state. */
@@ -636,6 +866,9 @@ export async function planResponsesPairCollapse(
 ): Promise<ResponsesPairCollapsePlan> {
   const o: GptHistoryOptions = { ...GPT_HISTORY_DEFAULTS, ...opts };
   const { old, state } = classifyResponsesPairs(items, o.keepRecentPairs);
+  if (o.responsesMode === 'mixed') {
+    return planResponsesMixedCollapse(items, old, state, isProfitable, o);
+  }
   const base = emptyResponsesPairPlan(state);
   if (old.length === 0) return { ...base, reason: 'no_closed_prefix' };
 

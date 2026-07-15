@@ -60,6 +60,23 @@ export interface GptRenderStyle {
   inkDilate: number;
 }
 
+export interface GptHistoryProfile {
+  /** Total history-image budget after the static slab. */
+  maxImages: number;
+  /** Recent ordinary conversation messages retained as native text. */
+  keepTail: number;
+  /** Recent completed call/output pairs retained as native protocol state. */
+  keepRecentPairs: number;
+  /** Local o200k floor before history profitability is evaluated. */
+  minCollapseTokens: number;
+  /** Responses items eligible for history images. */
+  responsesMode: 'pairs' | 'mixed';
+  /** Native text bracketing each history image group. */
+  framing: 'full' | 'compact';
+  /** Fact-sheet placement for discontiguous Responses history groups. */
+  factSheetScope: 'per-segment' | 'combined';
+}
+
 export interface GptModelProfile {
   /** How OpenAI bills the rendered images as input tokens. */
   vision: GptVisionCost;
@@ -69,6 +86,13 @@ export interface GptModelProfile {
   /** Max rendered image height in px. Threaded into the renderer so the gate's
    *  cost estimate and the actual page split agree. */
   maxHeightPx: number;
+  /** Local o200k token floor before image profitability is evaluated.
+   *  Undefined preserves the legacy character floor for non-o200k models. */
+  minCompressTokens?: number;
+  /** Exact-token sheet wording beside rendered content. */
+  factSheetFormat: 'full' | 'compact';
+  /** Model-specific history coverage and native-text overhead. */
+  history: GptHistoryProfile;
   /** Complete model-specific font, cell spacing, color, and marker style. */
   style: GptRenderStyle;
 }
@@ -90,6 +114,15 @@ const BASE_STYLE: GptRenderStyle = {
   markerRed: false,
   inkDilate: 0,
 };
+const BASE_HISTORY: GptHistoryProfile = {
+  maxImages: 32,
+  keepTail: 6,
+  keepRecentPairs: 6,
+  minCollapseTokens: 2000,
+  responsesMode: 'pairs',
+  framing: 'full',
+  factSheetScope: 'per-segment',
+};
 
 /**
  * Conservative fallback for unrecognized models: tile 85/170 over-states cost,
@@ -99,15 +132,33 @@ export const DEFAULT_GPT_PROFILE: GptModelProfile = {
   vision: { regime: 'tile', base: 85, perTile: 170 },
   stripCols: C,
   maxHeightPx: H,
+  minCompressTokens: 500,
+  factSheetFormat: 'full',
+  history: BASE_HISTORY,
   style: BASE_STYLE,
 };
 
 const GPT56_SOL_PROFILE: GptModelProfile = {
   vision: { regime: 'patch', multiplier: 1, patchCap: 10000 },
-  // Native 5×8 cells fit 152 columns at OpenAI's 768px short-side floor.
-  // Sol remains opt-in because broader recall is below the Fable bar.
+  // Validated production recipe. Rejected RGB-overprint research lives under
+  // eval/sol-profile and is not shipped in the runtime renderer.
   stripCols: C,
   maxHeightPx: H,
+  minCompressTokens: 500,
+  factSheetFormat: 'full',
+  history: {
+    ...BASE_HISTORY,
+    maxImages: 64,
+    // The latest user request is protected independently by the Responses
+    // planner. Keep only one additional recent message/pair native so closed,
+    // unreferenced history does not dominate long stateless requests.
+    keepTail: 1,
+    keepRecentPairs: 1,
+    minCollapseTokens: 1000,
+    responsesMode: 'mixed',
+    framing: 'compact',
+    factSheetScope: 'combined',
+  },
   style: { ...BASE_STYLE, font: 'spleen-5x8' },
 };
 
@@ -129,12 +180,12 @@ const BUILTIN_RULES: ProfileRule[] = [
   // nano patch models: ceil(patches * 2.46), cap 1536
   {
     test: (m) => isMiniNanoPatch(m) && /nano/.test(m),
-    profile: { vision: { regime: 'patch', multiplier: 2.46, patchCap: 1536 }, stripCols: C, maxHeightPx: H, style: BASE_STYLE },
+    profile: { vision: { regime: 'patch', multiplier: 2.46, patchCap: 1536 }, stripCols: C, maxHeightPx: H, minCompressTokens: 500, factSheetFormat: 'full', history: BASE_HISTORY, style: BASE_STYLE },
   },
   // mini / o4-mini patch models: ceil(patches * 1.62), cap 1536
   {
     test: (m) => isMiniNanoPatch(m) && !/nano/.test(m),
-    profile: { vision: { regime: 'patch', multiplier: 1.62, patchCap: 1536 }, stripCols: C, maxHeightPx: H, style: BASE_STYLE },
+    profile: { vision: { regime: 'patch', multiplier: 1.62, patchCap: 1536 }, stripCols: C, maxHeightPx: H, minCompressTokens: 500, factSheetFormat: 'full', history: BASE_HISTORY, style: BASE_STYLE },
   },
   // Exact Sol variant observed on production traffic. Do not match bare 5.6 or
   // sibling variants (for example gpt-5.6-terra): model-specific visual tuning
@@ -146,17 +197,17 @@ const BUILTIN_RULES: ProfileRule[] = [
   // 5.x flagship (gpt-5.4/5.5/…, no -mini/-nano): patch, multiplier 1, detail:original cap
   {
     test: (m) => /^gpt-5\.\d/.test(m),
-    profile: { vision: { regime: 'patch', multiplier: 1, patchCap: 10000 }, stripCols: C, maxHeightPx: H, style: BASE_STYLE },
+    profile: { vision: { regime: 'patch', multiplier: 1, patchCap: 10000 }, stripCols: C, maxHeightPx: H, minCompressTokens: 500, factSheetFormat: 'full', history: BASE_HISTORY, style: BASE_STYLE },
   },
   // gpt-5 / gpt-5-chat-latest: tile 70/140
   {
     test: (m) => /^gpt-5/.test(m),
-    profile: { vision: { regime: 'tile', base: 70, perTile: 140 }, stripCols: C, maxHeightPx: H, style: BASE_STYLE },
+    profile: { vision: { regime: 'tile', base: 70, perTile: 140 }, stripCols: C, maxHeightPx: H, minCompressTokens: 500, factSheetFormat: 'full', history: BASE_HISTORY, style: BASE_STYLE },
   },
   // o1 / o3 reasoning: tile 75/150
   {
     test: (m) => /^o[13]/.test(m),
-    profile: { vision: { regime: 'tile', base: 75, perTile: 150 }, stripCols: C, maxHeightPx: H, style: BASE_STYLE },
+    profile: { vision: { regime: 'tile', base: 75, perTile: 150 }, stripCols: C, maxHeightPx: H, minCompressTokens: 500, factSheetFormat: 'full', history: BASE_HISTORY, style: BASE_STYLE },
   },
 
   // Claude on the Responses path (Codex-style clients). Selection is by model
@@ -172,6 +223,8 @@ const BUILTIN_RULES: ProfileRule[] = [
       vision: { regime: 'tile', base: 85, perTile: 170 },
       stripCols: ANTHROPIC_STRIP_COLS,
       maxHeightPx: ANTHROPIC_MAX_HEIGHT_PX,
+      factSheetFormat: 'full',
+      history: BASE_HISTORY,
       style: { ...BASE_STYLE },
     },
   },
@@ -186,6 +239,9 @@ const BUILTIN_RULES: ProfileRule[] = [
       // 152 cols × 5px + pad = 768px short-side floor.
       stripCols: C,
       maxHeightPx: 512,
+      minCompressTokens: 500,
+      factSheetFormat: 'full',
+      history: { ...BASE_HISTORY, maxImages: 24 },
       style: {
         ...BASE_STYLE,
         aa: true,
@@ -228,6 +284,22 @@ function renderFont(v: unknown, fallback: RenderFont): RenderFont {
   return v === 'spleen-5x8' || v === 'jetbrains-mono-10' ? v : fallback;
 }
 
+function factSheetFormat(v: unknown, fallback: GptModelProfile['factSheetFormat']): GptModelProfile['factSheetFormat'] {
+  return v === 'full' || v === 'compact' ? v : fallback;
+}
+
+function responsesMode(v: unknown, fallback: GptHistoryProfile['responsesMode']): GptHistoryProfile['responsesMode'] {
+  return v === 'pairs' || v === 'mixed' ? v : fallback;
+}
+
+function historyFraming(v: unknown, fallback: GptHistoryProfile['framing']): GptHistoryProfile['framing'] {
+  return v === 'full' || v === 'compact' ? v : fallback;
+}
+
+function factSheetScope(v: unknown, fallback: GptHistoryProfile['factSheetScope']): GptHistoryProfile['factSheetScope'] {
+  return v === 'per-segment' || v === 'combined' ? v : fallback;
+}
+
 function parseEnvProfiles(raw: string): Map<string, GptModelProfile> {
   const out = new Map<string, GptModelProfile>();
   if (!raw) return out;
@@ -247,7 +319,9 @@ function parseEnvProfiles(raw: string): Map<string, GptModelProfile> {
     const base = key === 'gpt-5.6-sol' ? GPT56_SOL_PROFILE : resolveBuiltin(key);
     const p = v as Partial<GptModelProfile>;
     const styleIn = (p as { style?: GptRenderStyle }).style;
+    const historyIn = (p as { history?: Partial<GptHistoryProfile> }).history;
     const baseStyle = base.style;
+    const baseHistory = base.history;
     const style: GptRenderStyle = {
       font: renderFont(styleIn?.font, baseStyle.font),
       cellWBonus: nonNegativeInt(styleIn?.cellWBonus, baseStyle.cellWBonus),
@@ -264,10 +338,24 @@ function parseEnvProfiles(raw: string): Map<string, GptModelProfile> {
         : baseStyle.markerRed,
       inkDilate: nonNegativeInt(styleIn?.inkDilate, baseStyle.inkDilate),
     };
+    const history: GptHistoryProfile = {
+      maxImages: posInt(historyIn?.maxImages, baseHistory.maxImages),
+      keepTail: nonNegativeInt(historyIn?.keepTail, baseHistory.keepTail),
+      keepRecentPairs: nonNegativeInt(historyIn?.keepRecentPairs, baseHistory.keepRecentPairs),
+      minCollapseTokens: nonNegativeInt(historyIn?.minCollapseTokens, baseHistory.minCollapseTokens),
+      responsesMode: responsesMode(historyIn?.responsesMode, baseHistory.responsesMode),
+      framing: historyFraming(historyIn?.framing, baseHistory.framing),
+      factSheetScope: factSheetScope(historyIn?.factSheetScope, baseHistory.factSheetScope),
+    };
     out.set(key, {
       vision: isValidVision(p.vision) ? p.vision : base.vision,
       stripCols: posInt(p.stripCols, base.stripCols),
       maxHeightPx: posInt(p.maxHeightPx, base.maxHeightPx),
+      minCompressTokens: p.minCompressTokens === undefined
+        ? base.minCompressTokens
+        : nonNegativeInt(p.minCompressTokens, base.minCompressTokens ?? 0),
+      factSheetFormat: factSheetFormat(p.factSheetFormat, base.factSheetFormat),
+      history,
       style,
     });
   }

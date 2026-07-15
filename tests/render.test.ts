@@ -67,6 +67,7 @@ describe('model-selectable font atlases', () => {
     });
     expect(img.droppedChars).toBe(0);
   });
+
 });
 
 describe('compactSlabWhitespace', () => {

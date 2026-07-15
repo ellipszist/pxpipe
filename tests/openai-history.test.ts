@@ -5,6 +5,7 @@
  * / min-size gates.
  */
 import { describe, expect, it } from 'vitest';
+import { countTokens as o200k } from 'gpt-tokenizer/encoding/o200k_base';
 import {
   planGptCollapse,
   planResponsesPairCollapse,
@@ -469,5 +470,104 @@ describe('planResponsesPairCollapse — native state classification', () => {
     expect(plan.pairState.malformedItems).toBe(6);
     const selected = new Set(plan.selectedIndices);
     for (let i = 24; i < items.length; i++) expect(selected.has(i)).toBe(false);
+  });
+
+  it('mixed mode images safe old messages with complete pairs but protects live and opaque state', async () => {
+    const items: Array<Record<string, unknown>> = [
+      { role: 'user', content: `old request ${'alpha '.repeat(500)}` },
+      { role: 'assistant', content: `old answer ${'beta '.repeat(500)}` },
+      ...pair('old_pair', 7000),
+      { type: 'reasoning', id: 'reasoning_live', encrypted_content: 'must-stay-native' },
+      { role: 'assistant', content: `later answer ${'gamma '.repeat(500)}` },
+      { role: 'user', content: 'current live request' },
+    ];
+    const plan = await planResponsesPairCollapse(items, yes, {
+      responsesMode: 'mixed', keepTail: 1, keepRecentPairs: 0,
+      minCollapseTokens: 1, maxImages: 100,
+    });
+    const selected = new Set(plan.selectedIndices);
+    expect(selected.has(0)).toBe(true);
+    expect(selected.has(1)).toBe(true);
+    expect(selected.has(2)).toBe(true);
+    expect(selected.has(3)).toBe(true);
+    expect(selected.has(4)).toBe(false);
+    expect(selected.has(5)).toBe(true);
+    expect(selected.has(6)).toBe(false);
+    expect(plan.segments).toHaveLength(2);
+    expect(plan.pairState.collapsedPairs).toBe(1);
+    const expectedBaseline =
+      o200k(String(items[0]!.content)) +
+      o200k(String(items[1]!.content)) +
+      o200k(JSON.stringify(items[2])) +
+      o200k(String(items[3]!.output)) +
+      o200k(String(items[5]!.content));
+    expect(plan.baselineTokens).toBe(expectedBaseline);
+    expect(plan.baselineTokens).toBeLessThan(o200k(plan.text));
+  });
+
+  it('with a one-item Sol tail, protects the latest user and newest closed pair only', async () => {
+    const items: Array<Record<string, unknown>> = [
+      { role: 'user', content: `old request ${'alpha '.repeat(500)}` },
+      ...pair('old_pair', 7000),
+      { role: 'assistant', content: `recent answer ${'beta '.repeat(500)}` },
+      ...pair('recent_pair', 7000),
+      { role: 'user', content: 'current live request' },
+    ];
+    const plan = await planResponsesPairCollapse(items, yes, {
+      responsesMode: 'mixed', keepTail: 1, keepRecentPairs: 1,
+      minCollapseTokens: 1, maxImages: 100,
+    });
+    const selected = new Set(plan.selectedIndices);
+    expect(selected.has(0)).toBe(true);
+    expect(selected.has(1)).toBe(true);
+    expect(selected.has(2)).toBe(true);
+    expect(selected.has(3)).toBe(true);
+    expect(selected.has(4)).toBe(false);
+    expect(selected.has(5)).toBe(false);
+    expect(selected.has(6)).toBe(false);
+    expect(plan.pairState).toMatchObject({
+      completedPairs: 2,
+      oldCompletedPairs: 1,
+      recentCompletedPairs: 1,
+      collapsedPairs: 1,
+    });
+  });
+
+  it('mixed mode never removes a message targeted by item_reference', async () => {
+    const items: Array<Record<string, unknown>> = [
+      { id: 'msg_old', type: 'message', role: 'assistant', content: `old ${'text '.repeat(1000)}` },
+      { type: 'item_reference', item_id: 'msg_old' },
+      { role: 'assistant', content: `safe ${'text '.repeat(1000)}` },
+      { role: 'user', content: 'live request' },
+    ];
+    const plan = await planResponsesPairCollapse(items, yes, {
+      responsesMode: 'mixed', keepTail: 1, keepRecentPairs: 0,
+      minCollapseTokens: 1, maxImages: 100,
+    });
+    expect(plan.selectedIndices).not.toContain(0);
+    expect(plan.selectedIndices).not.toContain(1);
+    expect(plan.selectedIndices).toContain(2);
+    expect(plan.selectedIndices).not.toContain(3);
+  });
+
+  it('mixed mode keeps referenced function pairs and unknown role-bearing items native', async () => {
+    const items: Array<Record<string, unknown>> = [
+      { id: 'fc_ref', type: 'function_call', call_id: 'ref', name: 'read', arguments: '{}' },
+      { id: 'fo_ref', type: 'function_call_output', call_id: 'ref', output: 'referenced result' },
+      { type: 'item_reference', id: 'fc_ref' },
+      { type: 'custom_state', role: 'assistant', content: `opaque ${'state '.repeat(1000)}` },
+      { role: 'assistant', content: `safe ${'text '.repeat(1000)}` },
+      { role: 'user', content: 'live request' },
+    ];
+    const plan = await planResponsesPairCollapse(items, yes, {
+      responsesMode: 'mixed', keepTail: 1, keepRecentPairs: 0,
+      minCollapseTokens: 1, maxImages: 100,
+    });
+    expect(plan.selectedIndices).not.toContain(0);
+    expect(plan.selectedIndices).not.toContain(1);
+    expect(plan.selectedIndices).not.toContain(2);
+    expect(plan.selectedIndices).not.toContain(3);
+    expect(plan.selectedIndices).toContain(4);
+    expect(plan.selectedIndices).not.toContain(5);
   });
 });

@@ -114,6 +114,17 @@ describe('ticket-style codes and occurrence counts', () => {
     expect(factSheetText(text)).not.toContain('×');
   });
 
+  it('supports compact profile framing without changing extracted facts', () => {
+    const text = 'retry DEPLOY-77 on src/core/openai.ts port 47821 DEPLOY-77';
+    const full = factSheetText(text);
+    const compact = factSheetText(text, 'compact');
+    expect(compact).toContain('DEPLOY-77 ×2');
+    expect(compact).toContain('src/core/openai.ts');
+    expect(compact).toContain('47821');
+    expect(compact).toContain('×N=count');
+    expect(compact.length).toBeLessThan(full.length);
+  });
+
   it('never double-counts one span matched by two patterns', () => {
     // 1.2.3 is hit by the version pattern; its 1.2 substring by decimal — offset dedup
     // plus substring-collapse must leave a single un-annotated v1.2.3-style entry.

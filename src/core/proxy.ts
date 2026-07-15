@@ -11,6 +11,10 @@ import {
   buildCacheablePrefixCountTokensBody,
 } from './measurement.js';
 import type { Usage } from './types.js';
+import {
+  anthropicMessagesToOpenAIResponses,
+  openAIResponsesToAnthropicResponse,
+} from './messages-responses-bridge.js';
 
 export interface ProxyConfig {
   /** 'cloudflare-ai-gateway': routes both families through gatewayBaseUrl;
@@ -40,6 +44,9 @@ export interface ProxyEvent {
   path: string;
   /** Top-level request model when present. Used for telemetry/dashboard labels only. */
   model?: string;
+  /** Provider cost/usage semantics after any internal wire bridge. Unlike
+   * `path`, this describes the upstream that actually billed the request. */
+  accountingProvider?: 'anthropic' | 'openai';
   status: number;
   /** Wall-clock ms from request start to event fire (≈ end of upstream body). */
   durationMs: number;
@@ -71,13 +78,13 @@ export interface ProxyEvent {
 /** Max chars of 4xx error body captured on ProxyEvent — enough for Anthropic's full error JSON. */
 const ERROR_BODY_MAX = 2048;
 
-/** Read the top-level `model` field from a /v1/messages body without parsing the full JSON.
- *  Returns null when not found — callers treat null as outside supported scope (fail-closed). */
+/** Read the actual top-level `model` field. The body is already buffered for
+ * transformation, so parsing it is both safer and simpler than a prefix regex
+ * (which could mistake `metadata.model` for the routing model). */
 function readModelField(body: Uint8Array): string | null {
   try {
-    const head = new TextDecoder().decode(body.subarray(0, 8192));
-    const m = /"model"\s*:\s*"([^"]{1,80})"/.exec(head);
-    return m ? m[1]! : null;
+    const value = JSON.parse(new TextDecoder().decode(body)) as { model?: unknown };
+    return typeof value.model === 'string' && value.model.length <= 200 ? value.model : null;
   } catch {
     return null;
   }
@@ -670,15 +677,32 @@ export function createProxy(config: ProxyConfig = {}) {
             info.baselineProbeStatus = 'ok';
           }
         }
+        // The Messages compatibility response exposes Anthropic's disjoint
+        // usage buckets to the client. Dashboard accounting still needs the
+        // original Responses semantics: input includes the cached subset.
+        const eventUsage = bridgedGptMessages && usage
+          ? {
+              ...usage,
+              input_tokens: (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0),
+              cached_tokens: usage.cache_read_input_tokens ?? 0,
+            }
+          : usage;
         await config.onRequest?.({
           method: req.method,
           path: url.pathname,
           model: requestModel,
+          // Provider-prefixed OpenCode routes such as `/openai/responses` are
+          // Responses-shaped even though they are not canonical `/v1/*` paths.
+          // Classify by the parsed wire route, otherwise the dashboard ignores
+          // GPT image/baseline telemetry and renders As text / Saved as dashes.
+          accountingProvider: isOpenAIChat || isOpenAIResponses || bridgedGptMessages
+            ? 'openai'
+            : 'anthropic',
           status,
           durationMs: Date.now() - t0,
           firstByteMs,
           info,
-          usage,
+          usage: eventUsage,
           error,
           errorBody,
           reqBodySha8,
@@ -705,6 +729,7 @@ export function createProxy(config: ProxyConfig = {}) {
     let bodyOut: BodyInit | null = null;
     let info: TransformInfo | undefined;
     let requestModel: string | undefined;
+    let bridgedGptMessages = false;
 
     // Two count_tokens probes on the pre-compression body (see docs/HISTORY_CACHE_MODEL.md):
     //   baselinePromise          → full-body input_tokens
@@ -725,19 +750,25 @@ export function createProxy(config: ProxyConfig = {}) {
         // /v1/messages is only a wire schema: Claude Code can target a non-
         // Anthropic model (for example GPT-5.6 Sol). Do not apply Claude's
         // renderer or Anthropic count_tokens merely because the route is
-        // Messages-shaped. Non-Anthropic Messages requests fail closed to
-        // passthrough until a model-aware Messages→Sol transform exists.
+        // Messages-shaped. Enabled GPT models take the standalone
+        // Messages→Responses bridge; unsupported models still fail closed.
         const messagesAnthropic = isMessages && isClaudeModel(model);
+        bridgedGptMessages = isMessages && !messagesAnthropic && isPxpipeSupportedGptModel(model);
         const modelOk = isMessages
-          ? messagesAnthropic && isPxpipeSupportedModel(model)
+          ? (messagesAnthropic && isPxpipeSupportedModel(model)) || bridgedGptMessages
           : isPxpipeSupportedGptModel(model);
         // Unsupported model → a true passthrough: no break-even compression
         // (a text-only model may not accept injected image blocks at all).
         const effectiveOpts = modelOk
           ? transformOpts
           : { ...transformOpts, compress: false };
+        const bridgeBody = bridgedGptMessages
+          ? anthropicMessagesToOpenAIResponses(bodyIn)
+          : bodyIn;
         const r = isMessages
-          ? await transformRequest(bodyIn, effectiveOpts)
+          ? bridgedGptMessages
+            ? await transformOpenAIResponses(bridgeBody, effectiveOpts)
+            : await transformRequest(bodyIn, effectiveOpts)
           : isOpenAIChat
             ? await transformOpenAIChatCompletions(bodyIn, effectiveOpts)
             : await transformOpenAIResponses(bodyIn, effectiveOpts);
@@ -776,6 +807,13 @@ export function createProxy(config: ProxyConfig = {}) {
           }
         }
       } catch (e) {
+        if (bridgedGptMessages && (e as Error).name === 'MessagesBridgeInvalidRequest') {
+          fire(400, undefined, `invalid_request: ${(e as Error).message}`);
+          return new Response(JSON.stringify({
+            type: 'error',
+            error: { type: 'invalid_request_error', message: (e as Error).message },
+          }), { status: 400, headers: { 'content-type': 'application/json' } });
+        }
         fire(502, undefined, `transform_error: ${(e as Error).message}`);
         return new Response(JSON.stringify({ error: 'pxpipe transform failed' }), {
           status: 502,
@@ -787,7 +825,16 @@ export function createProxy(config: ProxyConfig = {}) {
     }
 
     const outHeaders = filterHeaders(req.headers, STRIP_REQ_HEADERS);
-    if (isOpenAIPath) {
+    if (isOpenAIPath || bridgedGptMessages) {
+      outHeaders.delete('x-api-key');
+      // Never forward a Messages client's bearer credential across providers.
+      // A configured OpenAI key is installed below; otherwise auth stays absent.
+      if (bridgedGptMessages) outHeaders.delete('authorization');
+      const anthropicHeaders: string[] = [];
+      outHeaders.forEach((_value, name) => {
+        if (name.toLowerCase().startsWith('anthropic-')) anthropicHeaders.push(name);
+      });
+      for (const name of anthropicHeaders) outHeaders.delete(name);
       if (config.openAIApiKey) outHeaders.set('authorization', `Bearer ${config.openAIApiKey}`);
     } else if (config.apiKey && (!providerPrefixed || url.pathname.startsWith('/anthropic/'))) {
       outHeaders.set('x-api-key', config.apiKey);
@@ -798,8 +845,11 @@ export function createProxy(config: ProxyConfig = {}) {
     // Gateway OpenAI routes drop the `/v1` prefix; provider-prefixed passthrough
     // routes keep their full path so ocproxy-style upstreams see `/openai/*`,
     // `/google-ai-studio/*`, etc. exactly as the client sent them.
-    const outPath = isOpenAIPath && routes.stripOpenAIV1 ? path.replace(/^\/v1(?=\/)/, '') : path;
-    const upstreamUrl = upstreamBase + outPath;
+    const outPath = bridgedGptMessages
+      ? (routes.stripOpenAIV1 ? '/responses' : '/v1/responses')
+      : isOpenAIPath && routes.stripOpenAIV1 ? path.replace(/^\/v1(?=\/)/, '') : path;
+    const requestUpstreamBase = bridgedGptMessages ? openAIUpstream : upstreamBase;
+    const upstreamUrl = requestUpstreamBase + outPath;
     let upstreamRes: Response;
     try {
       upstreamRes = await fetch(upstreamUrl, {
@@ -809,6 +859,9 @@ export function createProxy(config: ProxyConfig = {}) {
         // duplex is required by spec when sending a stream as body
         ...(bodyOut instanceof ReadableStream ? { duplex: 'half' } : {}),
       } as RequestInit);
+      if (bridgedGptMessages) {
+        upstreamRes = await openAIResponsesToAnthropicResponse(upstreamRes, requestModel ?? '');
+      }
     } catch (e) {
       fire(502, info, `upstream_error: ${(e as Error).message}`);
       return new Response(JSON.stringify({ error: 'pxpipe upstream unreachable' }), {

@@ -264,10 +264,10 @@ describe('transformOpenAIChatCompletions (gpt-5.6-sol)', () => {
         { role: 'user', content: 'hi' },
       ],
     }));
-    // Default minCompressChars=2000, so 'short' is below threshold.
+    // Sol's profile owns an o200k token floor, so 'short' is below threshold.
     const result = await transformOpenAIChatCompletions(body);
     expect(result.info.compressed).toBe(false);
-    expect(result.info.reason).toMatch(/below_min_chars|not_profitable/);
+    expect(result.info.reason).toMatch(/below_min_tokens|not_profitable/);
   });
 });
 
@@ -526,7 +526,7 @@ describe('transformOpenAIResponses (gpt-5.6-sol)', () => {
     }));
     const result = await transformOpenAIResponses(body);
     expect(result.info.compressed).toBe(false);
-    expect(result.info.reason).toMatch(/below_min_chars|not_profitable/);
+    expect(result.info.reason).toMatch(/below_min_tokens|not_profitable/);
   });
 });
 
@@ -599,28 +599,22 @@ describe('transformOpenAIResponses — history collapse', () => {
     const out = JSON.parse(dec.decode(result.body)) as { input: Array<Record<string, unknown>> };
     // The first user item (slab anchor) is still present and first.
     expect((out.input[0] as { role?: string }).role).toBe('user');
-    // Each selected pair is replaced at its original call position.
+    // Mixed Sol mode merges safe messages and complete old pairs into far fewer groups.
     const historyItems = out.input.filter((item) => {
       const c = (item as { content?: unknown }).content;
       return (
         Array.isArray(c) &&
         c.some((p) => (p as { type?: string }).type === 'input_image') &&
-        c.some((p) => (p as { text?: string }).text?.includes('attribute every turn strictly by its tag'))
+        c.some((p) => (p as { text?: string }).text?.includes('Earlier turns in image(s)'))
       );
     });
-    expect(historyItems.length).toBe(result.info.responsesComposition!.collapsedFunctionPairs);
-    expect(historyItems.length).toBeGreaterThan(1);
+    expect(historyItems.length).toBeGreaterThan(0);
+    expect(historyItems.length).toBeLessThan(result.info.responsesComposition!.collapsedFunctionPairs ?? Infinity);
     const firstHistoryIdx = out.input.indexOf(historyItems[0]!);
     expect(firstHistoryIdx).toBeGreaterThan(0); // slab and opening user state stay first
     const serialized = JSON.stringify(out.input);
-    const firstContinuation = out.input.findIndex((item) =>
-      typeof item.content === 'string' && item.content.includes('Continue with 0'),
-    );
-    expect(firstContinuation).toBeGreaterThan(firstHistoryIdx);
-    expect(out.input.indexOf(historyItems.at(-1)!)).toBeGreaterThan(firstContinuation);
-    // Responses pair mode keeps every conversational message native and images only
-    // old completed function_call/output pairs.
-    expect(serialized).toContain(`${OPENING_PROMPT_MARKER} ${OPENING_PROMPT_MARKER}`);
+    // Old conversation text is now covered by the image instead of remaining native.
+    expect(serialized).not.toContain(`${OPENING_PROMPT_MARKER} ${OPENING_PROMPT_MARKER}`);
     expect(serialized).toContain(LIVE_PROMPT_MARKER);
     // The recent tail is still raw text items (function_call / user), not collapsed.
     const lastUser = [...out.input].reverse().find(
@@ -746,8 +740,11 @@ describe('transformOpenAIResponses — history collapse', () => {
     const serialized = JSON.stringify(out.input);
     // Oldest prefix became a bounded history-image item, while later history and
     // the current prompt remain plain text after the cap.
-    expect(serialized).toContain('attribute every turn strictly by its tag');
-    expect(serialized).toContain('Continue with 28');
+    expect(serialized).toContain('Earlier turns in image(s)');
+    // Sol keeps one newest completed pair native even when older conversational
+    // text now fits under the image cap.
+    expect(serialized).toContain('call_29');
+    expect(serialized).toContain('result 29');
     expect(serialized).toContain(LIVE_PROMPT_MARKER);
   });
 });
@@ -769,7 +766,7 @@ describe('transformOpenAIChatCompletions — history collapse', () => {
       return (
         Array.isArray(c) &&
         c.some((p) => (p as { type?: string }).type === 'image_url') &&
-        c.some((p) => (p as { text?: string }).text?.includes('attribute every turn strictly by its tag'))
+        c.some((p) => (p as { text?: string }).text?.includes('Earlier turns in image(s)'))
       );
     });
     expect(historyMsgs).toHaveLength(1);
@@ -846,7 +843,7 @@ describe('GPT history collapse — pins the live request as text (autonomous sha
       return (
         Array.isArray(c) &&
         c.some((p) => (p as { type?: string }).type === 'input_image') &&
-        c.some((p) => (p as { text?: string }).text?.includes('attribute every turn strictly by its tag'))
+        c.some((p) => (p as { text?: string }).text?.includes('Earlier turns in image(s)'))
       );
     }) as { content: Array<{ type: string; text?: string }> };
     expect(hist).toBeDefined();
@@ -871,7 +868,7 @@ describe('GPT history collapse — pins the live request as text (autonomous sha
       return (
         Array.isArray(c) &&
         c.some((p) => (p as { type?: string }).type === 'image_url') &&
-        c.some((p) => (p as { text?: string }).text?.includes('attribute every turn strictly by its tag'))
+        c.some((p) => (p as { text?: string }).text?.includes('Earlier turns in image(s)'))
       );
     }) as { content: Array<{ type: string; text?: string }> };
     expect(hist).toBeDefined();
@@ -969,6 +966,7 @@ describe('resolveGptProfile (Claude on Responses)', () => {
     expect(p.stripCols).toBe(312);
     expect(resolveGptProfile('claude-fable-5').maxHeightPx).toBe(728);
     expect(resolveGptProfile('claude-fable-5').stripCols).toBe(312);
+    expect(resolveGptProfile('claude-fable-5').minCompressTokens).toBeUndefined();
     for (const model of [
       'gpt-5.6-sol',
       'gpt-5.6-sol[1m]',
@@ -979,12 +977,27 @@ describe('resolveGptProfile (Claude on Responses)', () => {
       const sol = resolveGptProfile(model);
       expect(sol.maxHeightPx, model).toBe(1932);
       expect(sol.stripCols, model).toBe(152);
+      expect(sol.minCompressTokens, model).toBe(500);
       expect(sol.style.font, model).toBe('spleen-5x8');
+      expect(sol.style.aa, model).toBe(true);
+      expect(sol.history, model).toMatchObject({
+        responsesMode: 'mixed',
+        maxImages: 64,
+        keepTail: 1,
+        keepRecentPairs: 1,
+        minCollapseTokens: 1000,
+        framing: 'compact',
+        factSheetScope: 'combined',
+      });
+      expect(sol.factSheetFormat, model).toBe('full');
     }
     for (const model of ['gpt-5.6', 'gpt-5.6-terra', 'gpt-5.6-terra[1m]']) {
       const notSol = resolveGptProfile(model);
       expect(notSol.stripCols, model).toBe(152);
       expect(notSol.style.font, model).toBe('spleen-5x8');
+      expect(notSol.history.responsesMode, model).toBe('pairs');
+      expect(notSol.history.maxImages, model).toBe(32);
+      expect(notSol.factSheetFormat, model).toBe('full');
     }
     expect(resolveGptProfile('claude-fable-5').style.font).toBe('spleen-5x8');
   });
@@ -1008,6 +1021,7 @@ describe('resolveGptProfile (Grok)', () => {
     const p = resolveGptProfile('grok-4.5');
     expect(p.stripCols).toBe(152);
     expect(p.maxHeightPx).toBe(512);
+    expect(p.minCompressTokens).toBe(500);
     expect(p.style.font).toBe('spleen-5x8');
     expect(p.style.cellWBonus).toBe(0);
     expect(p.style.cellHBonus).toBe(0);
@@ -1039,6 +1053,17 @@ describe('resolveGptProfile style overrides', () => {
       process.env.PXPIPE_GPT_PROFILES = JSON.stringify({
         'gpt-5.6-sol': {
           stripCols: 100,
+          minCompressTokens: 900,
+          factSheetFormat: 'full',
+          history: {
+            responsesMode: 'pairs',
+            maxImages: 40,
+            keepTail: 8,
+            keepRecentPairs: 7,
+            minCollapseTokens: 1200,
+            framing: 'full',
+            factSheetScope: 'per-segment',
+          },
           style: {
             font: 'spleen-5x8',
             cellWBonus: 2,
@@ -1054,6 +1079,17 @@ describe('resolveGptProfile style overrides', () => {
       });
       expect(resolveGptProfile('gpt-5.6-sol-codex')).toMatchObject({
         stripCols: 100,
+        minCompressTokens: 900,
+        factSheetFormat: 'full',
+        history: {
+          responsesMode: 'pairs',
+          maxImages: 40,
+          keepTail: 8,
+          keepRecentPairs: 7,
+          minCollapseTokens: 1200,
+          framing: 'full',
+          factSheetScope: 'per-segment',
+        },
         style: {
           font: 'spleen-5x8',
           cellWBonus: 2,
@@ -1150,7 +1186,7 @@ describe('Grok history compression under default gate', () => {
     }
     const body = enc.encode(JSON.stringify({
       model: 'grok-4.5',
-      instructions: 'Keep identifiers exact. '.repeat(100),
+      instructions: 'Keep identifiers exact. '.repeat(200),
       input: items,
     }));
     const result = await transformOpenAIResponses(body, { minCompressChars: 1 });

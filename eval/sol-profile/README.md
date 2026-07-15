@@ -1,14 +1,16 @@
 # GPT-5.6 Sol render-profile pilot
 
-This is a deliberately small, paired **raw image-reading** pilot for the exact
-`gpt-5.6-sol` model. It compares:
+This directory contains raw image-reading benchmarks for the exact
+`gpt-5.6-sol` model. The original pilot compared:
 
 - `old_shared`: Spleen/Unifont grayscale AA, 5×8 cell, 152 columns;
 - `current_sol`: the production-resolved JetBrains Mono 10/Unifont grayscale AA,
   6×11 cell, 126 columns.
 
-Both arms keep the 1932 px height cap. The harness asserts all of these values
-before rendering and never targets Grok.
+Production remains on the validated 5×8 Spleen profile. The later JetBrains
+Mono 12 RGB-overprint work and its negative channel-separation result are kept
+as research; see [`QUALITY_RESULTS.md`](./QUALITY_RESULTS.md) and
+[`RGB_SEPARATION_RESULTS.md`](./RGB_SEPARATION_RESULTS.md).
 
 ## Live status (2026-07-09)
 

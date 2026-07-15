@@ -14,6 +14,7 @@ export interface TrackEvent {
   path: string;
   /** Top-level request model when present. */
   model?: string;
+  accounting_provider?: 'anthropic' | 'openai';
   status: number;
   duration_ms: number;
   first_byte_ms?: number;
@@ -33,6 +34,8 @@ export interface TrackEvent {
   image_tokens?: number;
   /** GPT only: o200k text tokens the imaged/stripped content would have cost. */
   baseline_imaged_tokens?: number;
+  /** GPT-only pxpipe-added native text, absent from the unproxied request. */
+  native_injected_tokens?: number;
   /** TEXT chars in the outgoing body (all text blocks, incl. non-compressed tool_results).
    *  With image_pixels, a regression over cold-miss events solves chars_per_token (α) and pixels_per_token (β). */
   outgoing_text_chars?: number;
@@ -177,6 +180,7 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     duration_ms: ev.durationMs,
   };
   if (ev.model) out.model = ev.model;
+  if (ev.accountingProvider) out.accounting_provider = ev.accountingProvider;
   if (ev.firstByteMs !== undefined) out.first_byte_ms = ev.firstByteMs;
   if (ev.error) out.error = ev.error;
   if (ev.errorBody) out.error_body = ev.errorBody;
@@ -208,6 +212,9 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     }
     if (info.baselineImagedTokens !== undefined && info.baselineImagedTokens > 0) {
       out.baseline_imaged_tokens = info.baselineImagedTokens;
+    }
+    if (info.nativeInjectedTokens !== undefined && info.nativeInjectedTokens > 0) {
+      out.native_injected_tokens = info.nativeInjectedTokens;
     }
     if (info.outgoingTextChars !== undefined && info.outgoingTextChars > 0) {
       out.outgoing_text_chars = info.outgoingTextChars;

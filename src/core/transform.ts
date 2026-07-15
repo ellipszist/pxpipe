@@ -509,6 +509,9 @@ export interface TransformInfo {
    *  the would-have-paid "as plain text" baseline. Compared against imageTokens
    *  for the per-request saving. See src/core/openai-savings.ts. */
   baselineImagedTokens?: number;
+  /** GPT only. Local o200k tokens added solely by pxpipe (pointers, exact-token
+   * sheets, and framing). Removed from the unproxied counterfactual. */
+  nativeInjectedTokens?: number;
   /** Total TEXT chars in the outgoing body (system + messages, excluding image base64).
    *  Denominator for empirical chars-per-token regression on cold-miss events. */
   outgoingTextChars?: number;

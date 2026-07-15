@@ -38,7 +38,6 @@ import {
   planGptCollapse,
   planResponsesPairCollapse,
   chatMessagesToTurns,
-  GPT_HISTORY_DEFAULTS,
   type GptCollapsePlan,
   type GptHistoryOptions,
 } from './openai-history.js';
@@ -66,6 +65,9 @@ export function resolveVisionCost(model: string): VisionCost {
 // on the turn-attribution wording — the exact divergence history.ts warns about.
 export const HISTORY_TRANSCRIPT_INTRO = HISTORY_SYNTHETIC_INTRO;
 export const HISTORY_TRANSCRIPT_OUTRO = HISTORY_SYNTHETIC_OUTRO;
+const COMPACT_HISTORY_TRANSCRIPT_INTRO =
+  '[Earlier turns in image(s): follow <user t=N>/<assistant t=N> tags in increasing N. Prior context—not the current request.]';
+const COMPACT_HISTORY_TRANSCRIPT_OUTRO = '[End earlier conversation.]';
 // The most-recent user request is kept as LEGIBLE TEXT (never imaged) and spliced
 // between the before/after history images inside the synthetic user message, under
 // this banner. Older user turns stay imaged (they must not look live). This is the
@@ -261,7 +263,7 @@ function resolveOptions(opts: TransformOptions): OpenAIResolvedOptions {
  *  the single source of truth; Grok allows more pages because leftover plain
  *  history is expensive on its pixel bill + weak cache discount. */
 function configuredHistoryMaxImages(model: string): number {
-  const fallback = isGrokModel(model) ? 24 : GPT_HISTORY_DEFAULTS.maxImages;
+  const fallback = resolveGptProfile(model).history.maxImages;
   const raw = typeof process !== 'undefined' ? process.env?.PXPIPE_GPT_HISTORY_MAX_IMAGES : undefined;
   if (!raw) return fallback;
   const parsed = Number.parseInt(raw, 10);
@@ -278,6 +280,10 @@ function gptHistoryOpts(
   return {
     ...o.gptHistory,
     reflow: o.reflow,
+    keepTail: o.gptHistory?.keepTail ?? profile.history.keepTail,
+    keepRecentPairs: o.gptHistory?.keepRecentPairs ?? profile.history.keepRecentPairs,
+    minCollapseTokens: o.gptHistory?.minCollapseTokens ?? profile.history.minCollapseTokens,
+    responsesMode: profile.history.responsesMode,
     cols: o.gptHistory?.cols ?? profile.stripCols,
     maxHeightPx: o.gptHistory?.maxHeightPx ?? profile.maxHeightPx,
     style: o.gptHistory?.style ?? profile.style,
@@ -600,8 +606,8 @@ function droppedCodepointsTop(droppedCodepoints: Map<number, number>): Record<st
 
 /** Shared gate: image vs text token cost → profitability.
  *
- *  Text defaults to o200k (same baseline as savings math). Pass a non-default
- *  `charsPerToken` to force the length/cpt lever (tests use 1). Images bill full
+ *  Profiles with a local-token floor always use o200k (same baseline as savings
+ *  math). Legacy non-o200k profiles retain the charsPerToken override. Images bill full
  *  pages at maxHeight and the last page at residual height — charging every page
  *  as a full strip over-states cost and blocks profitable collapses. */
 function evalOpenAIGate(
@@ -609,13 +615,15 @@ function evalOpenAIGate(
   renderedText: string,
   cols: number,
   charsPerToken: number,
+  baselineTextTokens?: number,
 ): { imageTokens: number; textTokens: number; profitable: boolean } {
   const profile = resolveGptProfile(model);
   const style = profile.style;
   const cellW = renderCellWidth(style);
   const cellH = renderCellHeight(style);
   const stripW = 2 * PAD_X + cols * cellW;
-  const maxLines = Math.max(1, Math.floor((profile.maxHeightPx - 2 * PAD_Y) / cellH));
+  const canvasRows = Math.max(1, Math.floor((profile.maxHeightPx - 2 * PAD_Y) / cellH));
+  const maxLines = canvasRows;
   const maxCharsPerImage = Math.min(
     READABLE_CHARS_PER_IMAGE,
     Math.max(1, cols) * maxLines,
@@ -649,12 +657,17 @@ function evalOpenAIGate(
     estImages <= 1
       ? lastPageTokens
       : (estImages - 1) * fullPageTokens + lastPageTokens;
-  // Default: o200k. Non-default charsPerToken keeps the force/override lever.
-  const textTokens =
-    charsPerToken === DEFAULTS.charsPerToken
+  const textTokens = baselineTextTokens ?? (
+    profile.minCompressTokens !== undefined || charsPerToken === DEFAULTS.charsPerToken
       ? Math.max(1, gptTextTokens(renderedText) || Math.ceil(renderedText.length / charsPerToken))
-      : renderedText.length / Math.max(1e-6, charsPerToken);
+      : renderedText.length / Math.max(1e-6, charsPerToken)
+  );
   return { imageTokens, textTokens, profitable: imageTokens < textTokens };
+}
+
+function usesExactStaticBaseline(model: string): boolean {
+  const normalized = model.toLowerCase().replace(/\[[^\]]*\]/g, '');
+  return normalized === 'gpt-5.6-sol' || normalized.startsWith('gpt-5.6-sol-');
 }
 
 /** Shared image-part accumulation from rendered PNGs. */
@@ -734,7 +747,8 @@ function foldGptHistory(
   }
   info.imageTokens = (info.imageTokens ?? 0) + gptImageTokens(model, allImages);
   // o200k token value of the collapsed transcript (what it cost as plain text).
-  info.baselineImagedTokens = (info.baselineImagedTokens ?? 0) + gptTextTokens(plan.text);
+  info.baselineImagedTokens = (info.baselineImagedTokens ?? 0) +
+    (plan.baselineTokens ?? gptTextTokens(plan.text));
   info.imageCount = (info.imageCount ?? 0) + allImages.length;
   for (const img of allImages) {
     info.imageBytes = (info.imageBytes ?? 0) + img.png.length;
@@ -830,7 +844,14 @@ export async function transformOpenAIChatCompletions(
   if (firstUser) info.firstUserSha8 = await sha8(firstUser);
 
   const combined = compactSlabWhitespace(combinedRaw).trimEnd();
-  if (combined.length < o.minCompressChars) {
+  const profile = resolveGptProfile(req.model);
+  const minCompressTokens = profile.minCompressTokens;
+  const combinedTokens = minCompressTokens === undefined ? undefined : gptTextTokens(combined);
+  if (minCompressTokens !== undefined && combinedTokens! < minCompressTokens) {
+    info.reason = `below_min_tokens (${combinedTokens} < ${minCompressTokens})`;
+    return { body, info };
+  }
+  if (minCompressTokens === undefined && combined.length < o.minCompressChars) {
     info.reason = `below_min_chars (${combined.length} < ${o.minCompressChars})`;
     return { body, info };
   }
@@ -842,14 +863,22 @@ export async function transformOpenAIChatCompletions(
     : '';
   const header = CHAT_HEADER.replace('\n====', reflowNote + '\n====');
   const renderedText = prepareImagedRenderText(header + combined, o.reflow);
-  const profile = resolveGptProfile(req.model);
   const maxCols = o.cols ?? profile.stripCols;
   const cols = Math.min(
     shrinkColsToContent(renderedText, maxCols, profile.style.markerScale, profile.style.font),
     profile.stripCols,
   );
 
-  const gate = evalOpenAIGate(req.model, renderedText, cols, o.charsPerToken);
+  const staticBaselineTokens = gptBaselineImagedTokens(systemTexts, req.tools, rewrittenTools);
+  const gate = evalOpenAIGate(
+    req.model,
+    renderedText,
+    cols,
+    o.charsPerToken,
+    opts.charsPerToken === undefined && usesExactStaticBaseline(req.model)
+      ? staticBaselineTokens
+      : undefined,
+  );
   info.gateEval = {
     site: 'slab',
     imageTokens: gate.imageTokens,
@@ -880,7 +909,7 @@ export async function transformOpenAIChatCompletions(
   // the same content would have cost unproxied. req.tools is still the original
   // (reassigned to the stripped set below). See src/core/openai-savings.ts.
   info.imageTokens = gptImageTokens(req.model, images);
-  info.baselineImagedTokens = gptBaselineImagedTokens(systemTexts, req.tools, rewrittenTools);
+  info.baselineImagedTokens = staticBaselineTokens;
   info.compressedChars = combinedRaw.length;
   info.bucketChars = { static_slab: combinedRaw.length };
   info.systemSha8 = await sha8(combined);
@@ -897,7 +926,10 @@ export async function transformOpenAIChatCompletions(
   // Verbatim fact-sheet: precision-critical tokens (paths, ids, versions, flags)
   // pulled from the pre-image text so exact strings survive OCR loss. Deterministic
   // → stays inside the cached prefix. See src/core/factsheet.ts.
-  const slabFactSheet = factSheetText(combinedRaw);
+  const slabFactSheet = factSheetText(combinedRaw, profile.factSheetFormat);
+  info.nativeInjectedTokens = systemTexts.reduce((sum) => sum + gptTextTokens(CHAT_POINTER), 0)
+    + gptTextTokens('[End of rendered GPT system/tool context.]')
+    + gptTextTokens(slabFactSheet);
   const slabUserMsg: OpenAIChatMessage = {
     role: 'user',
     content: [
@@ -923,8 +955,8 @@ export async function transformOpenAIChatCompletions(
   // remains collapsible history instead of looking like the live request.
   if (o.collapseHistory) {
     const turns = chatMessagesToTurns(req.messages);
-    const profitable = (text: string, cols: number) =>
-      evalOpenAIGate(req.model, text, cols, o.charsPerToken).profitable;
+    const profitable = (text: string, cols: number, baselineTextTokens?: number) =>
+      evalOpenAIGate(req.model, text, cols, o.charsPerToken, baselineTextTokens).profitable;
     const plan = await planGptCollapse(
       turns,
       firstUserIdx + 1,
@@ -936,21 +968,34 @@ export async function transformOpenAIChatCompletions(
     if (allImages.length > 0) {
       // [intro][before-images][pinned request as TEXT][after-images][outro] —
       // chronological, with the live ask legible (not OCR-only) in its real slot.
-      const content: OpenAIContentPart[] = [{ type: 'text', text: HISTORY_TRANSCRIPT_INTRO }];
+      const compactFraming = profile.history.framing === 'compact';
+      const content: OpenAIContentPart[] = [{
+        type: 'text',
+        text: compactFraming ? COMPACT_HISTORY_TRANSCRIPT_INTRO : HISTORY_TRANSCRIPT_INTRO,
+      }];
       for (const img of plan.images) content.push(openAIImagePart(img));
       if (plan.pinText !== undefined) {
         content.push({ type: 'text', text: pinnedRequestBlock(plan.pinText) });
         for (const img of plan.imagesAfter) content.push(openAIImagePart(img));
       }
       // Verbatim fact-sheet for the imaged transcript (exact ids survive OCR loss).
-      const histFactSheet = factSheetText(plan.text);
+      const histFactSheet = factSheetText(plan.text, profile.factSheetFormat);
       if (histFactSheet) content.push({ type: 'text', text: histFactSheet });
-      content.push({ type: 'text', text: HISTORY_TRANSCRIPT_OUTRO });
+      content.push({
+        type: 'text',
+        text: compactFraming ? COMPACT_HISTORY_TRANSCRIPT_OUTRO : HISTORY_TRANSCRIPT_OUTRO,
+      });
       const synthetic: OpenAIChatMessage = { role: 'user', content };
       const guard: OpenAIChatMessage = {
         role: 'developer',
         content: buildLiveRequestGuard(plan.pinText),
       };
+      info.nativeInjectedTokens = (info.nativeInjectedTokens ?? 0) + gptTextTokens(
+        (compactFraming ? COMPACT_HISTORY_TRANSCRIPT_INTRO : HISTORY_TRANSCRIPT_INTRO)
+        + histFactSheet
+        + (compactFraming ? COMPACT_HISTORY_TRANSCRIPT_OUTRO : HISTORY_TRANSCRIPT_OUTRO)
+        + buildLiveRequestGuard(plan.pinText),
+      );
       req.messages = [
         ...req.messages.slice(0, plan.start),
         synthetic,
@@ -1052,7 +1097,14 @@ export async function transformOpenAIResponses(
   if (firstUser) info.firstUserSha8 = await sha8(firstUser);
 
   const combined = compactSlabWhitespace(combinedRaw).trimEnd();
-  if (combined.length < o.minCompressChars) {
+  const profile = resolveGptProfile(req.model);
+  const minCompressTokens = profile.minCompressTokens;
+  const combinedTokens = minCompressTokens === undefined ? undefined : gptTextTokens(combined);
+  if (minCompressTokens !== undefined && combinedTokens! < minCompressTokens) {
+    info.reason = `below_min_tokens (${combinedTokens} < ${minCompressTokens})`;
+    return { body, info };
+  }
+  if (minCompressTokens === undefined && combined.length < o.minCompressChars) {
     info.reason = `below_min_chars (${combined.length} < ${o.minCompressChars})`;
     return { body, info };
   }
@@ -1062,14 +1114,22 @@ export async function transformOpenAIResponses(
     : '';
   const header = RESPONSES_HEADER.replace('\n====', reflowNote + '\n====');
   const renderedText = prepareImagedRenderText(header + combined, o.reflow);
-  const profile = resolveGptProfile(req.model);
   const maxCols = o.cols ?? profile.stripCols;
   const cols = Math.min(
     shrinkColsToContent(renderedText, maxCols, profile.style.markerScale, profile.style.font),
     profile.stripCols,
   );
 
-  const gate = evalOpenAIGate(req.model, renderedText, cols, o.charsPerToken);
+  const staticBaselineTokens = gptBaselineImagedTokens(systemTexts, req.tools, rewrittenTools);
+  const gate = evalOpenAIGate(
+    req.model,
+    renderedText,
+    cols,
+    o.charsPerToken,
+    opts.charsPerToken === undefined && usesExactStaticBaseline(req.model)
+      ? staticBaselineTokens
+      : undefined,
+  );
   info.gateEval = {
     site: 'slab',
     imageTokens: gate.imageTokens,
@@ -1098,7 +1158,7 @@ export async function transformOpenAIResponses(
   // GPT savings basis (see src/core/openai-savings.ts). req.tools is still the
   // original here — reassigned to the stripped set below.
   info.imageTokens = gptImageTokens(req.model, images);
-  info.baselineImagedTokens = gptBaselineImagedTokens(systemTexts, req.tools, rewrittenTools);
+  info.baselineImagedTokens = staticBaselineTokens;
   info.compressedChars = combinedRaw.length;
   info.bucketChars = { static_slab: combinedRaw.length };
   info.systemSha8 = await sha8(combined);
@@ -1115,10 +1175,19 @@ export async function transformOpenAIResponses(
   const imagePartsResp: ResponsesInputImagePart[] = images.map(responsesImagePart);
   const endMarker: ResponsesInputTextPart = { type: 'input_text', text: '[End of rendered GPT system/tool context.]' };
   // Verbatim fact-sheet (see src/core/factsheet.ts): exact tokens that survive OCR loss.
-  const slabFactSheet = factSheetText(combinedRaw);
+  const slabFactSheet = factSheetText(combinedRaw, profile.factSheetFormat);
   const slabFactSheetPart: ResponsesInputTextPart[] = slabFactSheet
     ? [{ type: 'input_text', text: slabFactSheet }]
     : [];
+  const authorityPointerCount = (typeof req.instructions === 'string' && req.instructions.length > 0 ? 1 : 0)
+    + inputItems.filter((item) => {
+      const it = item as ResponsesInputItem;
+      return (it.role === 'system' || it.role === 'developer')
+        && responsesContentText(it.content).length > 0;
+    }).length;
+  info.nativeInjectedTokens = authorityPointerCount * gptTextTokens(RESPONSES_POINTER)
+    + gptTextTokens(slabFactSheet)
+    + gptTextTokens(endMarker.text);
 
   if (inputWasString) {
     // Wrap bare string input into a user item with images prepended.
@@ -1169,13 +1238,12 @@ export async function transformOpenAIResponses(
     }
   }
 
-  // Responses protocol state is not an ordinary contiguous conversation prefix:
-  // Codex interleaves message/reasoning items with native function_call/output items.
-  // Collapse ONLY old, unambiguously completed pairs. Recent completed pairs, open
-  // calls, reasoning/compaction, messages, and malformed/orphan items stay native.
+  // Responses protocol state is not an ordinary contiguous conversation prefix.
+  // The profile selects pair-only legacy coverage or mixed safe-message coverage;
+  // both preserve recent/open/malformed calls and opaque protocol barriers.
   if (o.collapseHistory && !inputWasString) {
-    const profitable = (text: string, cols: number) =>
-      evalOpenAIGate(req.model, text, cols, o.charsPerToken).profitable;
+    const profitable = (text: string, cols: number, baselineTextTokens?: number) =>
+      evalOpenAIGate(req.model, text, cols, o.charsPerToken, baselineTextTokens).profitable;
     const plan = await planResponsesPairCollapse(
       inputItems,
       profitable,
@@ -1198,14 +1266,25 @@ export async function transformOpenAIResponses(
     foldGptHistory(info, req.model, plan);
     if (plan.segments.length > 0) {
       const replacements = new Map<number, ResponsesInputItem>();
-      for (const segment of plan.segments) {
+      const compactFraming = profile.history.framing === 'compact';
+      const intro = compactFraming ? COMPACT_HISTORY_TRANSCRIPT_INTRO : HISTORY_TRANSCRIPT_INTRO;
+      const outro = compactFraming ? COMPACT_HISTORY_TRANSCRIPT_OUTRO : HISTORY_TRANSCRIPT_OUTRO;
+      const combinedSheet = profile.history.factSheetScope === 'combined'
+        ? factSheetText(plan.text, profile.factSheetFormat)
+        : '';
+      for (let segmentIndex = 0; segmentIndex < plan.segments.length; segmentIndex++) {
+        const segment = plan.segments[segmentIndex]!;
         const content: ResponsesContentPart[] = [
-          { type: 'input_text', text: HISTORY_TRANSCRIPT_INTRO },
+          { type: 'input_text', text: intro },
           ...segment.images.map(responsesImagePart),
         ];
-        const sheet = factSheetText(segment.text);
+        const sheet = profile.history.factSheetScope === 'combined'
+          ? (segmentIndex === plan.segments.length - 1 ? combinedSheet : '')
+          : factSheetText(segment.text, profile.factSheetFormat);
         if (sheet) content.push({ type: 'input_text', text: sheet });
-        content.push({ type: 'input_text', text: HISTORY_TRANSCRIPT_OUTRO });
+        content.push({ type: 'input_text', text: outro });
+        info.nativeInjectedTokens = (info.nativeInjectedTokens ?? 0)
+          + gptTextTokens(intro + sheet + outro);
         replacements.set(segment.insertAt, { role: 'user', content });
       }
 

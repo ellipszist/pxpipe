@@ -447,6 +447,52 @@ describe('GPT savings split', () => {
     expect(row.actual_input).toBe(8200);
     expect(row.session_saved_so_far_delta).toBe(4200);
   });
+
+  it('uses OpenAI accounting for a bridged Sol Messages event and subtracts proxy overhead', async () => {
+    setAllowedModelBases(['gpt-5.6-sol']);
+    dash.update({
+      ...structuredClone(gptUpdate),
+      path: '/v1/messages',
+      accountingProvider: 'openai',
+      model: 'gpt-5.6-sol',
+      usage: { input_tokens: 10000, output_tokens: 200, cached_tokens: 2000 },
+      info: {
+        ...structuredClone(gptUpdate.info),
+        nativeInjectedTokens: 1000,
+        firstUserSha8: 'bridgedsol',
+      },
+    } as never);
+    const recent = (await dash.serveRecent().json()) as RecentPayload;
+    const row = recent.recent.at(-1)!;
+    // actual=8200; baseline=8200+(50000-8000-1000)*0.1=12300
+    expect(row.actual_input).toBe(8200);
+    expect(row.baseline_input).toBe(12300);
+    expect(row.session_saved_so_far_delta).toBe(4100);
+  });
+
+  it('replays bridged Sol Messages with the same provider and overhead semantics', async () => {
+    setAllowedModelBases(['gpt-5.6-sol']);
+    writeEvents(tmp, [ev({
+      path: '/v1/messages',
+      accounting_provider: 'openai',
+      model: 'gpt-5.6-sol',
+      compressed: true,
+      input_tokens: 10000,
+      output_tokens: 200,
+      cached_tokens: 2000,
+      image_tokens: 8000,
+      baseline_imaged_tokens: 50000,
+      native_injected_tokens: 1000,
+      image_count: 1,
+      first_user_sha8: 'bridgedsol',
+    })]);
+    await dash.replay(tmp.eventsFile);
+    const recent = (await dash.serveRecent().json()) as RecentPayload;
+    const row = recent.recent.at(-1)!;
+    expect(row.actual_input).toBe(8200);
+    expect(row.baseline_input).toBe(12300);
+    expect(row.session_saved_so_far_delta).toBe(4100);
+  });
 });
 
 describe('server-observed warmth: text follows actual cache_read', () => {

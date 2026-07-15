@@ -75,10 +75,11 @@ export function computeOpenAIBaselineRawTokens(
   inputTokens: number,
   imageTokens: number,
   baselineImagedTokens: number,
+  nativeInjectedTokens: number = 0,
 ): number {
   if (inputTokens <= 0) return 0;
   const delta = (baselineImagedTokens || 0) - (imageTokens || 0);
-  return Math.max(0, inputTokens + delta);
+  return Math.max(0, inputTokens + delta - Math.max(0, nativeInjectedTokens || 0));
 }
 
 /** Weighted input tokens for the unproxied GPT text counterfactual.
@@ -96,10 +97,13 @@ export function computeOpenAIBaselineInputEff(
   imageTokens: number,
   baselineImagedTokens: number,
   model?: string,
+  nativeInjectedTokens: number = 0,
 ): number {
   const actual = computeOpenAIActualInputEff(inputTokens, cachedTokens, model);
   if (inputTokens <= 0 || imageTokens <= 0 || baselineImagedTokens <= 0) return actual;
   const delta = baselineImagedTokens - imageTokens;
   const deltaWeight = (cachedTokens || 0) > 0 ? openAICacheReadRate(model) : 1.0;
-  return actual + delta * deltaWeight;
+  // Synthetic native text occupies the same stable prefix as the images, so
+  // apply the same observed cache weight as the replacement delta.
+  return actual + (delta - Math.max(0, nativeInjectedTokens || 0)) * deltaWeight;
 }

@@ -376,7 +376,11 @@ export const ASSUMED_INPUT_USD_PER_MTOK = 10.0;
  *  model (vision-token imaging, automatic 0.1× prefix cache, no count_tokens
  *  probe, 8× output); everything else uses the Anthropic cache-aware baseline.
  *  Anthropic paths are `/v1/messages[/count_tokens]`; neither word appears. */
-function isOpenAIEvent(path: string | undefined): boolean {
+function isOpenAIEvent(
+  path: string | undefined,
+  accountingProvider?: 'anthropic' | 'openai',
+): boolean {
+  if (accountingProvider) return accountingProvider === 'openai';
   if (!path) return false;
   return path.includes('responses') || path.includes('chat/completions');
 }
@@ -399,6 +403,7 @@ function gptEff(args: {
   cachedTokens: number;
   imageTokens: number;
   baselineImagedTokens: number;
+  nativeInjectedTokens: number;
   compressed: boolean;
 }): {
   haveUsage: boolean;
@@ -411,7 +416,7 @@ function gptEff(args: {
   rawBaseline: number;
 } {
   const { model, inputTokens: inp, outputTokens: out, cachedTokens: cached } = args;
-  const { imageTokens, baselineImagedTokens, compressed } = args;
+  const { imageTokens, baselineImagedTokens, nativeInjectedTokens, compressed } = args;
   const haveUsage = inp > 0 || out > 0;
   // The transform measured what the imaged content would have cost as o200k
   // text; without it there is no counterfactual to credit.
@@ -419,13 +424,17 @@ function gptEff(args: {
   const actualInputEff = haveUsage ? computeOpenAIActualInputEff(inp, cached, model) : 0;
   const creditSaving = haveBaseline && haveUsage && compressed;
   const baselineInputEff = creditSaving
-    ? computeOpenAIBaselineInputEff(inp, cached, imageTokens, baselineImagedTokens, model)
+    ? computeOpenAIBaselineInputEff(
+        inp, cached, imageTokens, baselineImagedTokens, model, nativeInjectedTokens,
+      )
     : actualInputEff;
   const outputEquiv = haveUsage ? out * openAIOutputRate(model) : 0;
   // Raw, rate-free token counts for the session's compression ratio and the
   // Details panel: actual = what we sent; baseline = the text-only equivalent.
   const rawActual = inp;
-  const rawBaseline = computeOpenAIBaselineRawTokens(inp, imageTokens, baselineImagedTokens);
+  const rawBaseline = computeOpenAIBaselineRawTokens(
+    inp, imageTokens, baselineImagedTokens, nativeInjectedTokens,
+  );
   return {
     haveUsage,
     haveBaseline,
@@ -599,7 +608,7 @@ export class DashboardState {
     const out = u?.output_tokens ?? 0;
     const cc = u?.cache_creation_input_tokens ?? 0;
     const cr = u?.cache_read_input_tokens ?? 0;
-    const gpt = isOpenAIEvent(ev.path);
+    const gpt = isOpenAIEvent(ev.path, ev.accountingProvider);
 
     // Unified per-row accounting, filled by the provider branch below. The
     // downstream totals / per-session / recent-row code reads only these —
@@ -628,6 +637,7 @@ export class DashboardState {
         cachedTokens: u?.cached_tokens ?? 0,
         imageTokens: info?.imageTokens ?? 0,
         baselineImagedTokens: info?.baselineImagedTokens ?? 0,
+        nativeInjectedTokens: info?.nativeInjectedTokens ?? 0,
         compressed,
       });
       haveUsage = e.haveUsage;
@@ -945,7 +955,7 @@ export class DashboardState {
       const cc = t.cache_create_tokens ?? 0;
       const cr = t.cache_read_tokens ?? 0;
       const compressed = t.compressed === true;
-      const gpt = isOpenAIEvent(t.path);
+      const gpt = isOpenAIEvent(t.path, t.accounting_provider);
 
       // Same unified accounting as update(); see the branch comments there.
       let haveUsage: boolean;
@@ -968,6 +978,8 @@ export class DashboardState {
           imageTokens: (t as { image_tokens?: number }).image_tokens ?? 0,
           baselineImagedTokens:
             (t as { baseline_imaged_tokens?: number }).baseline_imaged_tokens ?? 0,
+          nativeInjectedTokens:
+            (t as { native_injected_tokens?: number }).native_injected_tokens ?? 0,
           compressed,
         });
         haveUsage = e.haveUsage;
