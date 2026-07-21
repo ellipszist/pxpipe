@@ -4,6 +4,33 @@ All notable changes to pxpipe are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor = features /
 behavioral changes, patch = fixes).
 
+## Unreleased — 2026-07-19
+
+### Fixed
+- **Glyph surgery: the Spleen 5×8 `K` no longer reads as `H`.** The stock font
+  rendered `K` as `H` with a single crossbar pixel removed — Hamming distance 1,
+  the worst confusable pair in the atlas
+  ([legibility audit §2](docs/LEGIBILITY-AUDIT-2026-07-01.md)). `gen-atlas.ts`
+  now repaints `K` with a diagonal-legged bitmap (Hamming 8 from `H`; no
+  alphanumeric pair below d=2). Scoped to the narrow Spleen 5×8 primary cell, so
+  the JetBrains-Mono and CJK-fallback atlases are untouched. Zero token-cost
+  change (same 5×8 box). Regression-guarded in `tests/render.test.ts`.
+
+### Known limitations / evidence
+- **Model-level A/B validation (2026-07-19, `claude-fable-5`, direct API):**
+  paired reads of identical seeded fixtures rendered with each atlas
+  (2 arms × 8 pages × 3 reps = 48 reads; base `b754d95` vs this PR `ab063f2`).
+  H/K per-char error 119/252 (47.2%) → 47/252 (18.7%); `K`→`H` confusions
+  42 → 1; paired per-position McNemar exact p = 2.4e-07. No collateral
+  regression: non-H/K error 32.2% → 31.7%, identical-image control pages at
+  run-variance floor. Full write-up in
+  [FINDINGS.md](FINDINGS.md) ("Update (2026-07-19)").
+- Reproduce directly — no fixtures or screenshots needed:
+  `npx tsx eval/glyph-matrix/demo-glyph.mts` prints the `K`/`H` bitmaps before
+  (stock font) and after (shipped atlas) with their Hamming distance.
+- The known `,`/`;` and `.`/`:` pairs remain 1 px apart and are out of scope; the
+  new regression guard enforces d≥2 across letters and digits only.
+
 ## 0.9.0 — 2026-07-14
 
 ### Changed
