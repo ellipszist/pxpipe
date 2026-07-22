@@ -4,9 +4,51 @@ All notable changes to pxpipe are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor = features /
 behavioral changes, patch = fixes).
 
-## Unreleased — 2026-07-19
+## 0.10.0 — 2026-07-22
+
+### Added
+- Gemini 3.6 Flash support through Google AI Studio, including static-context,
+  tool-result, and completed-history compression. Gemini joins Fable 5 in the
+  default model set after scoring 100/100 novel arithmetic, 98/98 gist recall,
+  18/18 state tracking, and 14/15 controlled dense-hex reads.
+- OpenAI Responses and Chat Completions bridges for Messages clients, with
+  completed tool-call rounds collapsed atomically and open/recent protocol
+  state kept native.
+- Scoped OpenAI and Cloudflare model routing, reversible Claude-safe discovery
+  aliases, and provider-aware usage accounting.
+- Offline `pxpipe export` workflow and public dense-render primitive.
+- Anthropic's patch-based vision-token model and model-specific render profiles.
+
+### Changed
+- Multi-column rendering was removed from the public render and transform
+  options. Production geometry measurements showed that gutters increased a
+  representative Gemini corpus from 30 images to 31 or 32, so single-column
+  rendering is now the only path. This removes the pre-1.0 `multiCol` option
+  from `RenderTextToImagesOptions` and `TransformOptions`, and removes the
+  Worker `MULTI_COL` setting.
+- Missing atlas glyphs are escaped as `[U+HEX]` instead of silently dropped.
+- Gemini and OpenAI history compression preserve the live request and recent
+  tail as native text while imaging only closed old history.
+- Dashboard savings compare the same measured requests, account for one-hour
+  cache writes, and exclude Google traffic from Claude-priced dollar totals.
+- 4xx request-body persistence is opt-in rather than enabled by default.
 
 ### Fixed
+- History-only OpenAI requests now receive the planned synthetic history
+  images instead of rendering them and returning the original request.
+- Gemini preserves full native tool documentation when static tool imaging is
+  not profitable, even if history or tool-result compression still applies.
+- Routed model discovery includes configured OpenAI and Cloudflare models and
+  falls back to normal upstream discovery when no routed models are configured.
+- Claude Code OAuth credentials never cross to the OpenAI upstream, appended
+  system blocks stay live, deferred/native tools pass through safely, and
+  schema stripping preserves `$schema` and draft-07 tuple items.
+- Responses assistant text uses `output_text`, transactional factsheet anchors
+  are retained, and Node stream/error handling no longer leaks listeners or
+  crashes on drain errors.
+- Dashboard model IDs are escaped before entering `hx-vals`.
+
+### Rendering
 - **Glyph surgery: the Spleen 5×8 `K` no longer reads as `H`.** The stock font
   rendered `K` as `H` with a single crossbar pixel removed — Hamming distance 1,
   the worst confusable pair in the atlas
@@ -30,6 +72,12 @@ behavioral changes, patch = fixes).
   (stock font) and after (shipped atlas) with their Hamming distance.
 - The known `,`/`;` and `.`/`:` pairs remain 1 px apart and are out of scope; the
   new regression guard enforces d≥2 across letters and digits only.
+- A production-faithful Gemini positional-retrieval sweep used the actual
+  transformer and 6, 18, and 30 history images (within the 32-image cap).
+  Pxpipe/raw row localization was 18/30 versus 17/30, semantic recognition was
+  11/30 versus 13/30, and exact retrieval tied at 3/30. This is directional
+  evidence, not a broad Lost-in-the-Middle win or loss; see
+  `eval/gemini-profile/QUALITY_RESULTS.md`.
 
 ## 0.9.0 — 2026-07-14
 

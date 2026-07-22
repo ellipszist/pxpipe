@@ -10,3 +10,9 @@ onlyBuiltDependencies:
 # repo we update manually.
 minimumReleaseAge: 4320  # minutes (= 3 days)
 # minimumReleaseAgeExclude:  # add packages here if a fast follow is needed
+
+overrides:
+  "ws@>=8.0.0 <8.20.1": "^8.20.1"
+  "vite@>=8.0.0 <8.0.16": "^8.0.16"
+  "undici@>=7.0.0 <7.28.0": "^7.28.0"
+  "esbuild@>=0.27.3 <0.28.1": "^0.28.1"

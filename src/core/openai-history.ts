@@ -1126,3 +1126,42 @@ function chatMessageToTurn(msg: unknown, idx: number): HistoryTurn {
 export function chatMessagesToTurns(messages: unknown[]): HistoryTurn[] {
   return messages.map((msg, i) => chatMessageToTurn(msg, i));
 }
+
+function responsesItemToTurn(item: unknown, idx: number): HistoryTurn {
+  const o = (item ?? {}) as Record<string, unknown>;
+  const type = responseItemType(item);
+  const callId = responseCallId(item);
+  if (type === 'function_call_output') {
+    return {
+      text: responseOutputText(o),
+      openIds: [],
+      closeIds: callId ? [callId] : [],
+      opaque: false,
+    };
+  }
+  if (type === 'function_call') {
+    return {
+      text: responseCallText(o),
+      openIds: callId ? [callId] : [],
+      closeIds: [],
+      opaque: false,
+    };
+  }
+  const msgText = responseMessageText(item);
+  if (msgText) {
+    const { role, text } = msgText;
+    const tag = role === 'user' ? 'user' : 'assistant';
+    return {
+      text: `<${tag} t="${idx}">\n${text}\n</${tag}>`,
+      openIds: [],
+      closeIds: [],
+      opaque: false,
+      userText: role === 'user' ? text : undefined,
+    };
+  }
+  return { text: '', openIds: [], closeIds: [], opaque: false };
+}
+
+export function responsesItemsToTurns(items: unknown[]): HistoryTurn[] {
+  return items.map((item, i) => responsesItemToTurn(item, i));
+}

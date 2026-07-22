@@ -880,7 +880,7 @@ export class DashboardState {
     // baseline. An
     // uncompressed row contributes zero saved (baseline === actual), so
     // including it here would only dilute the "saved on rows we moved" %.
-    const dollarEligible = !google;
+    const dollarEligible = ev.accountingProvider !== 'google';
     if (creditSaving) {
       totals.baselineInputWeighted += baselineInputEff;
       totals.actualInputWeighted += actualInputEff;

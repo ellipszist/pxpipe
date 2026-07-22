@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-21T20:18:28.695Z",
+  "generatedAt": "2026-07-22T13:54:49.134Z",
   "model": "gemini-3.6-flash",
   "live": true,
   "correct": 14,
@@ -30,7 +30,7 @@
       "got": "c9c947f680ec",
       "ok": true,
       "raw": "c9c947f680ec",
-      "ms": 3617,
+      "ms": 3502,
       "dimensions": [
         {
           "width": 1568,
@@ -46,7 +46,7 @@
       "got": "851eb3af1bd1",
       "ok": true,
       "raw": "851eb3af1bd1",
-      "ms": 3797,
+      "ms": 3490,
       "dimensions": [
         {
           "width": 1568,
@@ -62,7 +62,7 @@
       "got": "ade34f70fd73",
       "ok": true,
       "raw": "ade34f70fd73",
-      "ms": 3768,
+      "ms": 3035,
       "dimensions": [
         {
           "width": 1568,
@@ -78,7 +78,7 @@
       "got": "c5d68855f46d",
       "ok": true,
       "raw": "c5d68855f46d",
-      "ms": 4464,
+      "ms": 5744,
       "dimensions": [
         {
           "width": 1568,
@@ -94,7 +94,7 @@
       "got": "92abade01aad",
       "ok": true,
       "raw": "92abade01aad",
-      "ms": 4215,
+      "ms": 4816,
       "dimensions": [
         {
           "width": 1568,
@@ -110,7 +110,7 @@
       "got": "ffe21785b09d",
       "ok": true,
       "raw": "ffe21785b09d",
-      "ms": 4399,
+      "ms": 3658,
       "dimensions": [
         {
           "width": 1568,
@@ -126,7 +126,7 @@
       "got": "87cb51eb0e99",
       "ok": true,
       "raw": "87cb51eb0e99",
-      "ms": 4315,
+      "ms": 3490,
       "dimensions": [
         {
           "width": 1568,
@@ -142,7 +142,7 @@
       "got": "93c3ced96dac",
       "ok": true,
       "raw": "93c3ced96dac",
-      "ms": 3469,
+      "ms": 3902,
       "dimensions": [
         {
           "width": 1568,
@@ -158,7 +158,7 @@
       "got": "f152ae9bfb8f",
       "ok": true,
       "raw": "f152ae9bfb8f",
-      "ms": 4938,
+      "ms": 3567,
       "dimensions": [
         {
           "width": 1568,
@@ -174,7 +174,7 @@
       "got": "5a7373d4187f",
       "ok": true,
       "raw": "5a7373d4187f",
-      "ms": 3935,
+      "ms": 3729,
       "dimensions": [
         {
           "width": 1568,
@@ -190,7 +190,7 @@
       "got": "44ea8c7aeedd",
       "ok": true,
       "raw": "44ea8c7aeedd",
-      "ms": 3961,
+      "ms": 3624,
       "dimensions": [
         {
           "width": 1568,
@@ -206,7 +206,7 @@
       "got": "8145b5a0fd46",
       "ok": true,
       "raw": "8145b5a0fd46",
-      "ms": 2918,
+      "ms": 2409,
       "dimensions": [
         {
           "width": 1568,
@@ -219,10 +219,10 @@
       "page": 4,
       "dur": 2921,
       "gold": "b8fce698f971",
-      "got": "b3fce698f971",
-      "ok": false,
-      "raw": "b3fce698f971",
-      "ms": 24902,
+      "got": "b8fce698f971",
+      "ok": true,
+      "raw": "b8fce698f971",
+      "ms": 4992,
       "dimensions": [
         {
           "width": 1568,
@@ -238,7 +238,7 @@
       "got": "4a8164556b99",
       "ok": true,
       "raw": "4a8164556b99",
-      "ms": 4330,
+      "ms": 3141,
       "dimensions": [
         {
           "width": 1568,
@@ -251,10 +251,10 @@
       "page": 4,
       "dur": 8799,
       "gold": "e53112c4b5a4",
-      "got": "e53112c4b5a4",
-      "ok": true,
-      "raw": "e53112c4b5a4",
-      "ms": 4311,
+      "got": "e53112c4b54a",
+      "ok": false,
+      "raw": "e53112c4b54a",
+      "ms": 5065,
       "dimensions": [
         {
           "width": 1568,

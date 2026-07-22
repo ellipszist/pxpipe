@@ -695,11 +695,33 @@ describe('proxy usage extraction', () => {
     });
   });
 
-  it('returns an empty discovery list when Cloudflare has no configured model', async () => {
+  it('uses normal upstream discovery when Cloudflare has no configured model', async () => {
+    let upstreamUrl = '';
+    const restore = mockUpstream(async (req) => {
+      upstreamUrl = req.url;
+      return new Response(JSON.stringify({ data: [{ id: 'claude-fable-5' }] }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    });
     const proxy = createProxy({ cloudflareUpstream: 'https://chat.test/v1' });
     expect(await (await proxy(new Request('http://localhost/v1/models'))).json()).toEqual({
-      data: [], has_more: false, first_id: '', last_id: '',
+      data: [{ id: 'claude-fable-5' }],
     });
+    restore();
+    expect(upstreamUrl).toBe('https://api.anthropic.com/v1/models');
+  });
+
+  it('advertises OpenAI and Cloudflare routed models together', async () => {
+    const proxy = createProxy({
+      openAIModels: ['gpt-5.6-sol'],
+      cloudflareUpstream: 'https://chat.test/v1',
+      cloudflareModels: ['moonshotai/kimi-k3'],
+    });
+    const body = await (await proxy(new Request('http://localhost/v1/models'))).json() as any;
+    expect(body.data.map((model: any) => model.id)).toEqual([
+      'claude-gpt-5.6-sol',
+      'claude-moonshotai/kimi-k3',
+    ]);
   });
 
   it('uses the resolved Kimi model for compression eligibility and telemetry', async () => {

@@ -465,7 +465,7 @@ describe('collapseHistory', () => {
 
   it('preserves a tool_use sequence that straddles the live-tail boundary', async () => {
     // 14 turns: 10 closed turns, then an open tool_use at index 10 that closes at index 12.
-    // Per-turn body bumped to 4200 chars so the row-aware gate (numCols=1) clears
+    // Per-turn body bumped to 4200 chars so the row-aware gate clears
     // the per-block break-even point. The tool_use/tool_result block labels
     // add ~65 chars of header overhead that pushes a tighter fixture under
     // the boundary; 4200-char turns leave headroom.
@@ -830,7 +830,7 @@ describe('isCompressionProfitableAmortized — multi-turn horizon gate', () => {
     // Synthetic text big enough to render to ≥1 image. Use a string so both
     // gates take the row-aware path.
     const text = 'word '.repeat(20_000);
-    expect(amort(text, 100, undefined, 1, 1.5, 1)).toBe(cold(text, 100, undefined, 1, 1.5));
+    expect(amort(text, 100, undefined, 1.5, 1)).toBe(cold(text, 100, undefined, 1.5));
   });
 
   it('flips a per-turn-rejected collapse to accepted at horizon=10', async () => {
@@ -850,10 +850,10 @@ describe('isCompressionProfitableAmortized — multi-turn horizon gate', () => {
     const text = 'a'.repeat(8_000);
     // At single-col cols=100 with row-aware estimate this is a single image
     // with image_tokens ~= 2500 vs text_tokens = 8000/1.5 ~= 5333. Cold
-    // accepts. Push image cost up by forcing numCols=1 and a much higher
+    // accepts. Push image cost up with a much higher
     // cpt so text_tokens are small.
-    const coldResult = cold(text, 100, undefined, 1, 4 /* English */);
-    const amortResult = amort(text, 100, undefined, 1, 4, 10);
+    const coldResult = cold(text, 100, undefined, 4 /* English */);
+    const amortResult = amort(text, 100, undefined, 4, 10);
     // Cold gate at cpt=4: text_tokens = 2000, image_tokens = 2500 → reject.
     // Amortized gate at N=10: image_lifetime = 2500*(1.25+0.1*9)=5375;
     // text_lifetime = 2000*0.1*10 = 2000. 5375 < 2000 is FALSE — so
@@ -867,8 +867,8 @@ describe('isCompressionProfitableAmortized — multi-turn horizon gate', () => {
     // textTokens = textLen/cpt. Pick cpt=1.5, textLen needed = 8065.
     // That's 8065 chars in a single image at cols=100, which is plausible.
     const text2 = 'a'.repeat(8500);
-    const coldResult2 = cold(text2, 100, undefined, 1, 1.5);
-    const amortResult2 = amort(text2, 100, undefined, 1, 1.5, 10);
+    const coldResult2 = cold(text2, 100, undefined, 1.5);
+    const amortResult2 = amort(text2, 100, undefined, 1.5, 10);
     // Document the per-turn behaviour so this regression is loud if the
     // gate semantics change.
     expect(typeof coldResult).toBe('boolean');

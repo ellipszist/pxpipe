@@ -598,6 +598,49 @@ function buildChatMessages(turns: number): Array<Record<string, unknown>> {
 }
 
 describe('transformOpenAIResponses — history collapse', () => {
+  it('applies history compression without static context', async () => {
+    const input = buildResponsesInput(20);
+    const result = await transformOpenAIResponses(enc.encode(JSON.stringify({
+      model: 'gpt-5.6-sol',
+      input,
+    })), { charsPerToken: 1, minCompressChars: 1 });
+
+    expect(result.info.compressed).toBe(true);
+    expect(result.info.historyReason).toBe('collapsed');
+    const out = JSON.parse(dec.decode(result.body)) as { input: Array<Record<string, unknown>> };
+    expect(JSON.stringify(out.input)).not.toBe(JSON.stringify(input));
+    expect(out.input.some((item) => Array.isArray(item.content) &&
+      (item.content as Array<{ type?: string }>).some((part) => part.type === 'input_image'))).toBe(true);
+  });
+
+  it.each([
+    ['below threshold', 'short static context', true],
+    ['unprofitable', 'x\n'.repeat(700), false],
+  ])('still compresses history when static context is %s', async (_case, instructions, reflow) => {
+    const input = buildResponsesInput(20);
+    const result = await transformOpenAIResponses(enc.encode(JSON.stringify({
+      model: 'gpt-5.6-sol',
+      instructions,
+      input,
+    })), { charsPerToken: 1, minCompressChars: 1, reflow });
+
+    expect(result.info.compressed).toBe(true);
+    expect(result.info.historyReason).toBe('collapsed');
+    expect(result.info.bucketChars?.static_slab).toBeUndefined();
+    if (_case === 'unprofitable') expect(result.info.gateEval?.profitable).toBe(false);
+    else expect(result.info.gateEval).toBeUndefined();
+    const out = JSON.parse(dec.decode(result.body)) as {
+      instructions: string;
+      input: Array<Record<string, unknown>>;
+    };
+    expect(out.instructions).toBe(instructions);
+    expect(out.input.some((item) => Array.isArray(item.content) &&
+      (item.content as Array<{ type?: string }>).some((part) => part.type === 'input_image'))).toBe(true);
+    const calls = new Set(out.input.filter((item) => item.type === 'function_call').map((item) => item.call_id));
+    const outputs = out.input.filter((item) => item.type === 'function_call_output').map((item) => item.call_id);
+    expect(outputs.every((callId) => calls.has(callId))).toBe(true);
+  });
+
   it('collapses the OLD transcript prefix into history images, keeps the tail as text', async () => {
     const body = enc.encode(JSON.stringify({
       model: 'gpt-5.6-sol',
@@ -766,6 +809,43 @@ describe('transformOpenAIResponses — history collapse', () => {
 });
 
 describe('transformOpenAIChatCompletions — history collapse', () => {
+  it('applies history compression without static context', async () => {
+    const messages = buildChatMessages(20).filter((message) => message.role !== 'system');
+    const result = await transformOpenAIChatCompletions(enc.encode(JSON.stringify({
+      model: 'gpt-5.6-sol',
+      messages,
+    })), { charsPerToken: 1, minCompressChars: 1 });
+
+    expect(result.info.compressed).toBe(true);
+    expect(result.info.historyReason).toBe('collapsed');
+    const out = JSON.parse(dec.decode(result.body)) as { messages: Array<Record<string, unknown>> };
+    expect(JSON.stringify(out.messages)).not.toBe(JSON.stringify(messages));
+    expect(out.messages.some((message) => Array.isArray(message.content) &&
+      (message.content as Array<{ type?: string }>).some((part) => part.type === 'image_url'))).toBe(true);
+  });
+
+  it.each([
+    ['below threshold', 'short static context', true],
+    ['unprofitable', 'x\n'.repeat(700), false],
+  ])('still compresses history when static context is %s', async (_case, staticContext, reflow) => {
+    const messages = buildChatMessages(20);
+    messages[0] = { role: 'system', content: staticContext };
+    const result = await transformOpenAIChatCompletions(enc.encode(JSON.stringify({
+      model: 'gpt-5.6-sol',
+      messages,
+    })), { charsPerToken: 1, minCompressChars: 1, reflow });
+
+    expect(result.info.compressed).toBe(true);
+    expect(result.info.historyReason).toBe('collapsed');
+    expect(result.info.bucketChars?.static_slab).toBeUndefined();
+    if (_case === 'unprofitable') expect(result.info.gateEval?.profitable).toBe(false);
+    else expect(result.info.gateEval).toBeUndefined();
+    const out = JSON.parse(dec.decode(result.body)) as { messages: Array<Record<string, unknown>> };
+    expect(out.messages).toContainEqual({ role: 'system', content: staticContext });
+    expect(out.messages.some((message) => Array.isArray(message.content) &&
+      (message.content as Array<{ type?: string }>).some((part) => part.type === 'image_url'))).toBe(true);
+  });
+
   it('collapses the OLD transcript into a synthetic user message with image_url parts', async () => {
     const body = enc.encode(JSON.stringify({
       model: 'gpt-5.6-sol',
@@ -980,6 +1060,8 @@ describe('resolveGptProfile (Claude on Responses)', () => {
     const p = resolveGptProfile('claude-opus-4-8');
     expect(p.maxHeightPx).toBe(728);
     expect(p.stripCols).toBe(312);
+    expect(resolveGptProfile('claude-3-5-opus').maxHeightPx).toBe(728);
+    expect(resolveGptProfile('claude-3-5-opus').stripCols).toBe(312);
     expect(resolveGptProfile('claude-fable-5').maxHeightPx).toBe(728);
     expect(resolveGptProfile('claude-fable-5').stripCols).toBe(312);
     expect(resolveGptProfile('claude-fable-5').minCompressTokens).toBeUndefined();
@@ -1018,15 +1100,30 @@ describe('resolveGptProfile (Claude on Responses)', () => {
     expect(resolveGptProfile('claude-fable-5').style.font).toBe('spleen-5x8');
   });
 
-  it('renders Claude Responses at Claude width instead of the GPT default cap', async () => {
-    const body = enc.encode(JSON.stringify({
-      model: 'claude-fable-5',
-      instructions: BIG_INSTRUCTIONS,
-      input: [{ role: 'user', content: 'hello' }],
-    }));
-    const result = await transformOpenAIResponses(body, { charsPerToken: 1, minCompressChars: 1 });
-    expect(result.info.compressed).toBe(true);
-    expect(result.info.firstImageWidth).toBe(1568);
+  it('isolates Opus profile overrides from Fable profile', () => {
+    const prev = process.env.PXPIPE_GPT_PROFILES;
+    try {
+      process.env.PXPIPE_GPT_PROFILES = JSON.stringify({
+        'claude-opus': {
+          stripCols: 200,
+          style: { cellWBonus: 2, cellHBonus: 2 },
+        },
+      });
+      const opus = resolveGptProfile('claude-opus-4-8');
+      const fable = resolveGptProfile('claude-fable-5');
+
+      expect(opus.stripCols).toBe(200);
+      expect(opus.style.cellWBonus).toBe(2);
+      expect(opus.style.cellHBonus).toBe(2);
+
+      // Fable remains unaffected by Opus overrides
+      expect(fable.stripCols).toBe(312);
+      expect(fable.style.cellWBonus).toBe(0);
+      expect(fable.style.cellHBonus).toBe(0);
+    } finally {
+      if (prev !== undefined) process.env.PXPIPE_GPT_PROFILES = prev;
+      else delete process.env.PXPIPE_GPT_PROFILES;
+    }
   });
 });
 

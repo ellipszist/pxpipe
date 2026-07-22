@@ -5,6 +5,7 @@
  * passes transformed payloads to Google AI Studio.
  */
 
+import { countTokens as o200kCountTokens } from 'gpt-tokenizer/encoding/o200k_base';
 import {
   neutralizeSentinel,
   reflow,
@@ -572,56 +573,58 @@ export async function transformGoogleGenerateContent(
   const authorityText = systemTexts.join('\n\n');
   const combinedRaw = [authorityText, toolRewrite.docs].filter(Boolean).join('\n\n');
   info.origChars = combinedRaw.length;
-  if (!combinedRaw) {
-    info.reason = 'no_static_context';
-    return { body: bodyBytes, info };
-  }
 
   const profile = resolveGeminiProfile();
-  const combined = compactSlabWhitespace(combinedRaw).trimEnd();
-  const reflowNote = options.reflow !== false
-    ? ' The glyph ↵ (U+21B5) marks an original hard line break in content; treat it as a real newline.'
-    : '';
-  const header = CHAT_HEADER.replace('\n====', reflowNote + '\n====');
-  const renderedText = prepareImagedRenderText(header + combined, options.reflow !== false);
+  let staticImages: RenderedImage[] = [];
+  let staticProfitable = false;
+  let textTokens = 0;
+  let imageTokens = 0;
+  let nativeInjectedTokens = 0;
+  let fsText: string | null = null;
+  let renderedText = '';
 
-  const maxCols = options.cols ?? profile.stripCols;
-  const cols = Math.min(
-    shrinkColsToContent(renderedText, maxCols, profile.style.markerScale, profile.style.font),
-    profile.stripCols,
-  );
+  if (combinedRaw) {
+    const combined = compactSlabWhitespace(combinedRaw).trimEnd();
+    const reflowNote = options.reflow !== false
+      ? ' The glyph ↵ (U+21B5) marks an original hard line break in content; treat it as a real newline.'
+      : '';
+    const header = CHAT_HEADER.replace('\n====', reflowNote + '\n====');
+    renderedText = prepareImagedRenderText(header + combined, options.reflow !== false);
 
-  const images = await renderTextToPngs(renderedText, cols, profile.style, profile.maxHeightPx);
-  const imageTokens = images.reduce(
-    (total, image) => total + geminiVisionTokens(modelName, image.width, image.height),
-    0,
-  );
-  const textTokens = Math.max(
-    1,
-    googleTextTokens(authorityText)
-      + Math.max(0, toolRewrite.originalTokens - toolRewrite.rewrittenTokens),
-  );
-  const fsText = factSheetText(combinedRaw, profile.factSheetFormat);
-  const nativeText = SYSTEM_POINTER + (fsText ?? '');
-  const nativeInjectedTokens = Math.ceil(nativeText.length / 3.5);
+    const maxCols = options.cols ?? profile.stripCols;
+    const cols = Math.min(
+      shrinkColsToContent(renderedText, maxCols, profile.style.markerScale, profile.style.font),
+      profile.stripCols,
+    );
 
-  info.gateEval = {
-    site: 'slab',
-    imageTokens,
-    textTokens,
-    burnImageSide: nativeInjectedTokens,
-    burnTextSide: 0,
-    profitable: imageTokens + nativeInjectedTokens < textTokens,
-  };
-  if (!info.gateEval.profitable) {
-    info.reason = 'not_profitable';
-    return { body: bodyBytes, info };
+    staticImages = await renderTextToPngs(renderedText, cols, profile.style, profile.maxHeightPx);
+    imageTokens = staticImages.reduce(
+      (total, image) => total + geminiVisionTokens(modelName, image.width, image.height),
+      0,
+    );
+    textTokens = Math.max(
+      1,
+      googleTextTokens(authorityText)
+        + Math.max(0, toolRewrite.originalTokens - toolRewrite.rewrittenTokens),
+    );
+    fsText = factSheetText(combinedRaw, profile.factSheetFormat);
+    const nativeText = SYSTEM_POINTER + (fsText ?? '');
+    nativeInjectedTokens = Math.ceil(nativeText.length / 3.5);
+
+    info.gateEval = {
+      site: 'slab',
+      imageTokens,
+      textTokens,
+      burnImageSide: nativeInjectedTokens,
+      burnTextSide: 0,
+      profitable: imageTokens + nativeInjectedTokens < textTokens,
+    };
+    staticProfitable = info.gateEval.profitable;
   }
 
-  // Build image parts
-  const imageParts: GooglePart[] = images.map(imagePart);
-
-  if (fsText) {
+  // Build static image parts if static slab is profitable
+  const imageParts: GooglePart[] = staticProfitable ? staticImages.map(imagePart) : [];
+  if (staticProfitable && fsText) {
     imageParts.push({ text: fsText });
   }
 
@@ -670,18 +673,33 @@ export async function transformGoogleGenerateContent(
   const toolResultPlan = await compressGoogleToolResults(contents, modelName, options);
   contents = toolResultPlan.contents;
 
-  // Static context goes first in the first user turn, matching the Anthropic path.
-  if (contents.length > 0 && contents[0] && contents[0].role === 'user') {
-    const firstTurn = contents[0];
-    contents[0] = {
-      ...firstTurn,
-      parts: [...imageParts, ...(firstTurn.parts || [])],
-    };
-  } else {
-    contents.unshift({
-      role: 'user',
-      parts: imageParts,
-    });
+  const hasStaticCompression = staticProfitable && staticImages.length > 0;
+  const hasHistoryCompression = !!historyPlan && historyPlan.images.length > 0;
+  const hasToolCompression = toolResultPlan.images.length > 0;
+
+  if (!hasStaticCompression && !hasHistoryCompression && !hasToolCompression) {
+    if (!combinedRaw) {
+      info.reason = 'no_static_context';
+    } else if (!staticProfitable) {
+      info.reason = 'not_profitable';
+    }
+    return { body: bodyBytes, info };
+  }
+
+  if (hasStaticCompression) {
+    // Static context goes first in the first user turn, matching the Anthropic path.
+    if (contents.length > 0 && contents[0] && contents[0].role === 'user') {
+      const firstTurn = contents[0];
+      contents[0] = {
+        ...firstTurn,
+        parts: [...imageParts, ...(firstTurn.parts || [])],
+      };
+    } else {
+      contents.unshift({
+        role: 'user',
+        parts: imageParts,
+      });
+    }
   }
 
   // Keep a native system-level pointer so the imaged instruction retains its
@@ -689,29 +707,34 @@ export async function transformGoogleGenerateContent(
   const transformedReq: GoogleGenerateContentRequest = {
     ...req,
     contents,
-    ...(toolRewrite.tools !== undefined ? { tools: toolRewrite.tools } : {}),
-    systemInstruction: {
-      ...req.systemInstruction,
-      parts: [{ text: SYSTEM_POINTER }],
-    },
+    ...(hasStaticCompression && toolRewrite.tools !== undefined ? { tools: toolRewrite.tools } : {}),
+    ...(hasStaticCompression
+      ? {
+          systemInstruction: {
+            ...req.systemInstruction,
+            parts: [{ text: SYSTEM_POINTER }],
+          },
+        }
+      : {}),
   };
 
+  const effectiveStaticImages = hasStaticCompression ? staticImages : [];
   info.compressed = true;
-  info.imageCount = images.length;
-  info.imageBytes = images.reduce((acc, img) => acc + img.png.byteLength, 0);
-  info.imageTokens = imageTokens;
-  info.baselineImagedTokens = textTokens;
-  info.nativeInjectedTokens = nativeInjectedTokens;
-  info.compressedChars = combinedRaw.length;
-  info.bucketChars = { static_slab: combinedRaw.length };
-  info.firstImagePng = images[0]?.png;
-  info.firstImageWidth = images[0]?.width;
-  info.firstImageHeight = images[0]?.height;
-  info.imagePngs = images.map((image) => image.png);
-  info.imageDims = images.map((image) => ({ width: image.width, height: image.height }));
-  info.imageSourceText = renderedText.slice(0, 65_536);
+  info.imageCount = effectiveStaticImages.length;
+  info.imageBytes = effectiveStaticImages.reduce((acc, img) => acc + img.png.byteLength, 0);
+  info.imageTokens = hasStaticCompression ? imageTokens : 0;
+  info.baselineImagedTokens = hasStaticCompression ? textTokens : 0;
+  info.nativeInjectedTokens = hasStaticCompression ? nativeInjectedTokens : 0;
+  info.compressedChars = hasStaticCompression ? combinedRaw.length : 0;
+  info.bucketChars = hasStaticCompression ? { static_slab: combinedRaw.length } : {};
+  info.firstImagePng = effectiveStaticImages[0]?.png;
+  info.firstImageWidth = effectiveStaticImages[0]?.width;
+  info.firstImageHeight = effectiveStaticImages[0]?.height;
+  info.imagePngs = effectiveStaticImages.map((image) => image.png);
+  info.imageDims = effectiveStaticImages.map((image) => ({ width: image.width, height: image.height }));
+  info.imageSourceText = hasStaticCompression ? renderedText.slice(0, 65_536) : '';
   // Google renders a single combined text slab into page images; share source text across pages.
-  info.imageSourceTexts = images.map(() => info.imageSourceText);
+  info.imageSourceTexts = effectiveStaticImages.map(() => info.imageSourceText);
 
   if (historyPlan) {
       const historySheet = factSheetText(historyPlan.text, profile.factSheetFormat);

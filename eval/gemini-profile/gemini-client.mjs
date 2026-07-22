@@ -1,6 +1,6 @@
 // Dedicated Google AI Studio client for Gemini 3.6 Flash evaluations.
 
-export async function callGemini({ model = 'gemini-3.6-flash', content, maxOutputTokens = 1000, timeoutMs = 120000 }) {
+export async function callGeminiRequest({ model = 'gemini-3.6-flash', request, maxOutputTokens = 1000, timeoutMs = 120000 }) {
   const key = process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY;
   if (!key) throw new Error('OPENAI_API_KEY or GEMINI_API_KEY is required');
 
@@ -10,18 +10,6 @@ export async function callGemini({ model = 'gemini-3.6-flash', content, maxOutpu
   const cleanModel = model.replace(/^google\//, '').replace(/^claude-/, '');
   const url = `http://127.0.0.1:47821/google-ai-studio/v1beta/models/${cleanModel}:generateContent`;
 
-  const parts = content.map((part) => {
-    if (part.type === 'input_text') return { text: part.text };
-    if (part.type === 'input_image' && typeof part.image_url === 'string') {
-      const match = /^data:([^;]+);base64,(.*)$/.exec(part.image_url);
-      if (!match) throw new Error('Gemini eval requires base64 data images');
-      return {
-        inlineData: { mimeType: match[1], data: match[2] },
-      };
-    }
-    throw new Error(`unsupported Gemini content part: ${part.type}`);
-  });
-
   try {
     const response = await fetch(url, {
       method: 'POST',
@@ -29,7 +17,13 @@ export async function callGemini({ model = 'gemini-3.6-flash', content, maxOutpu
         'content-type': 'application/json',
         'x-goog-api-key': key,
       },
-      body: JSON.stringify({ contents: [{ parts }] }),
+      body: JSON.stringify({
+        ...request,
+        generationConfig: {
+          ...request.generationConfig,
+          maxOutputTokens,
+        },
+      }),
       signal: controller.signal,
     });
     const raw = await response.text();
@@ -47,4 +41,24 @@ export async function callGemini({ model = 'gemini-3.6-flash', content, maxOutpu
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function callGemini({ model = 'gemini-3.6-flash', content, maxOutputTokens = 1000, timeoutMs = 120000 }) {
+  const parts = content.map((part) => {
+    if (part.type === 'input_text') return { text: part.text };
+    if (part.type === 'input_image' && typeof part.image_url === 'string') {
+      const match = /^data:([^;]+);base64,(.*)$/.exec(part.image_url);
+      if (!match) throw new Error('Gemini eval requires base64 data images');
+      return {
+        inlineData: { mimeType: match[1], data: match[2] },
+      };
+    }
+    throw new Error(`unsupported Gemini content part: ${part.type}`);
+  });
+  return callGeminiRequest({
+    model,
+    request: { contents: [{ parts }] },
+    maxOutputTokens,
+    timeoutMs,
+  });
 }

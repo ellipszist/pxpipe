@@ -116,3 +116,24 @@ Receipts:
 - `eval/gemini-profile/novel-arithmetic-results.json`
 - `eval/gemini-profile/gist-recall-results.json`
 - `eval/gemini-profile/verbatim-hex-results.json`
+
+---
+
+## 6. Multi-Column Packing Rejected
+
+Gemini bills approximately 1,078 tokens per image at the production geometry, so a
+layout must reduce image count to save tokens. The shipped single-column page already
+uses the full 1,568 px width at 312 characters per row. Splitting that width into
+multiple columns loses capacity to gutters and cannot add horizontal pixels.
+
+Measured on the same 829,999-character reflowed key/value corpus:
+
+| layout | geometry | images | Gemini image tokens |
+|---|---:|---:|---:|
+| single column | 312 chars, 1568 px | **30** | **32,340** |
+| two columns | 2 × 152 chars, 1548 px | 31 | 33,418 |
+| three columns | 3 × 98 chars, 1518 px | 32 | 34,496 |
+
+Multi-column packing is strictly worse before accounting for its additional reading-order
+risk. It is therefore removed rather than retained as an unused option. Single-column
+312-character pages remain the only production rendering path.

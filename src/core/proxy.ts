@@ -124,8 +124,9 @@ function resolveClaudeGatewayModelId(model: string | null): string | undefined {
   return providerModel.includes('/') ? providerModel : undefined;
 }
 
-function cloudflareModelDisplayName(model: string): string {
-  return /kimi-k3/i.test(model) ? 'Kimi K3 (Cloudflare)' : model;
+function routedModelDisplayName(model: string, route: 'openai' | 'cloudflare'): string {
+  if (route === 'cloudflare' && /kimi-k3/i.test(model)) return 'Kimi K3 (Cloudflare)';
+  return `${model} (${route === 'cloudflare' ? 'Cloudflare' : 'OpenAI'})`;
 }
 
 /** Gzip via CompressionStream — available in Node 18+ and Cloudflare Workers. */
@@ -790,13 +791,11 @@ export function createProxy(config: ProxyConfig = {}) {
     // Reversibly disguise the configured upstream id for Claude Code's model
     // picker, matching CLIProxyAPI. The id decodes back to the exact provider
     // model on /v1/messages, so discovery and routing cannot drift apart.
-    if (req.method === 'GET' && url.pathname === '/v1/models'
-        && config.cloudflareUpstream !== undefined) {
-      const configuredModels = config.cloudflareModels?.filter(Boolean) ?? [];
-      const models = configuredModels.map((model) => ({
+    if (req.method === 'GET' && url.pathname === '/v1/models' && modelRoutes.size > 0) {
+      const models = [...modelRoutes].map(([model, route]) => ({
             id: claudeGatewayModelId(model),
             type: 'model',
-            display_name: cloudflareModelDisplayName(model),
+            display_name: routedModelDisplayName(model, route),
             created_at: '1970-01-01T00:00:00Z',
           }));
       return new Response(JSON.stringify({

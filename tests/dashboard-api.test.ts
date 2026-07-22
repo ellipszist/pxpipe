@@ -694,8 +694,7 @@ describe('Gemini savings split', () => {
     expect(stats.saved_input_tokens).toBe(2900);
     expect(stats.saved_usd).toBe(0);
     const header = await (await dash.serveFragment('header', new URL('http://localhost/fragments/header'), 1)).text();
-    expect(header).toContain('provider pricing not configured');
-    expect(header).not.toContain('at $10/M base input price');
+    expect(header).not.toContain('$0.03');
     const html = await (await dash.serveFragment('recent', new URL('http://localhost/fragments/recent'), 1)).text();
     expect(html).toContain('Details →');
     const details = await (await dash.serveFragment(

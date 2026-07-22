@@ -178,6 +178,8 @@ used for these novel-arithmetic rows.
 | verbatim 12-char hex, same dense pages | `gpt-5.6-sol` | 15 | **0/15** |
 | verbatim 12-char hex, same dense pages | `grok-4.5` | 15 | **0/15** |
 | verbatim 12-char hex, same dense pages | `moonshotai/kimi-k3` | 15 | **0/15** |
+| production-history row localization (2k/6k/10k records, 6–30 images) | `google/gemini-3.6-flash` raw / pxpipe | 30 paired | **17/30 / 18/30** |
+| same history, exact region + status + reference | `google/gemini-3.6-flash` raw / pxpipe | 30 paired | **3/30 / 3/30** |
 
 **Harness split:** Fable/Opus quality and SWE-bench rows use **Claude**; Sol and Grok quality use
 **Codex’s Responses provider** (`OPENAI_BASE_URL`). Kimi K3
@@ -185,6 +187,9 @@ used the same novel-arithmetic corpus and production renderer through pxpipe's
 Cloudflare Messages bridge. Gemini 3.6 Flash used Google AI Studio — see
 [`Gemini 3.6 Flash receipts`](eval/gemini-profile/QUALITY_RESULTS.md) and
 [`K3 receipt`](eval/sol-profile/model-moonshotai_kimi-k3-novel-arithmetic-results.json).
+Gemini's 14/15 dense-hex row is a controlled legibility result, not general
+long-context retrieval; the production-history benchmark separates key
+acknowledgment, row localization, semantic recognition, and exact reading.
 
 K3 semantic and exact-recall receipts:
 [`gist/state/guards`](eval/sol-profile/gist-recall-moonshotai_kimi-k3-results.json) and
@@ -298,7 +303,7 @@ Three kinds of *input* blocks, each behind a profitability gate:
 
 Everything else passes through byte-identical: your messages, recent turns,
 the model's output (it is the response, the proxy never touches it), sparse
-prose, and anything too small to win. Fable 5 is the only built-in default. Sol,
+prose, and anything too small to win. Fable 5 and Gemini 3.6 Flash are the built-in defaults. Sol,
 Opus, GPT 5.5, and Grok remain explicit opt-ins. Sol's production 5×8 run
 scored 98/100 arithmetic, 83/98 gist, 17/18 state, 4/16
 never-stated confabulations, and 0/15 dense hex. Grok scored 82/100

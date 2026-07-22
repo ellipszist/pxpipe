@@ -143,6 +143,49 @@ describe('transformGoogleGenerateContent', () => {
     expect(serialized).not.toContain('result-0 result-0 result-0');
   });
 
+  it('preserves full tools when history compresses but the static slab does not', async () => {
+    const contents: Array<Record<string, unknown>> = [
+      { role: 'user', parts: [{ text: 'Inspect the repository.' }] },
+    ];
+    for (let i = 0; i < 24; i++) {
+      contents.push({
+        role: 'model',
+        parts: [{ functionCall: { name: 'read', args: { filePath: `/tmp/file-${i}.ts` } } }],
+      });
+      contents.push({
+        role: 'user',
+        parts: [{ functionResponse: { name: 'read', response: { content: `result-${i} `.repeat(180) } } }],
+      });
+    }
+    const description = 'Read a file exactly as documented.';
+    const sampleBody = {
+      systemInstruction: { parts: [{ text: 'You are a coding agent.' }] },
+      tools: [{ functionDeclarations: [{
+        name: 'read',
+        description,
+        parameters: {
+          type: 'object',
+          properties: { filePath: { type: 'string', description: 'Absolute path.' } },
+          required: ['filePath'],
+        },
+      }] }],
+      contents,
+    };
+    const result = await transformGoogleGenerateContent(
+      new TextEncoder().encode(JSON.stringify(sampleBody)),
+      'gemini-3.6-flash',
+      { compress: true, compressToolResults: false },
+    );
+
+    expect(result.info.historyReason).toBe('collapsed');
+    expect(result.info.bucketChars?.static_slab).toBeUndefined();
+    const out = JSON.parse(new TextDecoder().decode(result.body));
+    const tool = out.tools[0].functionDeclarations[0];
+    expect(tool.description).toBe(description);
+    expect(tool.parameters.properties.filePath.description).toBe('Absolute path.');
+    expect(out.systemInstruction.parts[0].text).toBe('You are a coding agent.');
+  });
+
   it('collapses completed parallel Gemini function-call rounds', async () => {
     const contents: Array<Record<string, unknown>> = [
       { role: 'user', parts: [{ text: 'LIVE TASK: inspect files in parallel.' }] },
